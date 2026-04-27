@@ -190,7 +190,6 @@ Supported first:
 Do not try to evaluate JavaScript expressions. Instead, recursively scan string literals inside recognized class-bearing expressions.
 
 Examples:
-
 ```tsx
 <div className="px-4 font-bold" />
 <div className={isActive ? "text-blue-600" : "text-gray-500"} />
