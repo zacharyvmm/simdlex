@@ -19,6 +19,19 @@ pub trait ByteClassifier {
     const LANES: usize;
 
     fn classify_block(input: &[u8], offset: usize) -> ByteClasses;
+
+    fn lt_block_mask(input: &[u8], offset: usize) -> u64 {
+        Self::classify_block(input, offset).lt
+    }
+
+    fn gt_block_mask(input: &[u8], offset: usize) -> u64 {
+        Self::classify_block(input, offset).gt
+    }
+
+    fn tag_end_block_mask(input: &[u8], offset: usize) -> u64 {
+        let classes = Self::classify_block(input, offset);
+        classes.quote_double | classes.quote_single | classes.gt
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -73,6 +86,38 @@ impl ByteClassifier for ScalarClassifier {
 
         out
     }
+
+    fn lt_block_mask(input: &[u8], offset: usize) -> u64 {
+        scalar_byte_mask(input, offset, Self::LANES, b'<')
+    }
+
+    fn gt_block_mask(input: &[u8], offset: usize) -> u64 {
+        scalar_byte_mask(input, offset, Self::LANES, b'>')
+    }
+
+    fn tag_end_block_mask(input: &[u8], offset: usize) -> u64 {
+        let mut mask = 0;
+
+        for lane in 0..Self::LANES {
+            if matches!(input[offset + lane], b'"' | b'\'' | b'>') {
+                mask |= 1u64 << lane;
+            }
+        }
+
+        mask
+    }
+}
+
+fn scalar_byte_mask(input: &[u8], offset: usize, lanes: usize, byte: u8) -> u64 {
+    let mut mask = 0;
+
+    for lane in 0..lanes {
+        if input[offset + lane] == byte {
+            mask |= 1u64 << lane;
+        }
+    }
+
+    mask
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -90,6 +135,30 @@ impl ByteClassifier for RawSimdClassifier {
             unsafe { classify_block_ssse3(input, offset) }
         } else {
             ScalarClassifier::classify_block(input, offset)
+        }
+    }
+
+    fn lt_block_mask(input: &[u8], offset: usize) -> u64 {
+        if std::is_x86_feature_detected!("ssse3") {
+            unsafe { byte_eq_block_mask_ssse3(input, offset, b'<') }
+        } else {
+            ScalarClassifier::lt_block_mask(input, offset)
+        }
+    }
+
+    fn gt_block_mask(input: &[u8], offset: usize) -> u64 {
+        if std::is_x86_feature_detected!("ssse3") {
+            unsafe { byte_eq_block_mask_ssse3(input, offset, b'>') }
+        } else {
+            ScalarClassifier::gt_block_mask(input, offset)
+        }
+    }
+
+    fn tag_end_block_mask(input: &[u8], offset: usize) -> u64 {
+        if std::is_x86_feature_detected!("ssse3") {
+            unsafe { tag_end_block_mask_ssse3(input, offset) }
+        } else {
+            ScalarClassifier::tag_end_block_mask(input, offset)
         }
     }
 }
@@ -140,6 +209,24 @@ unsafe fn classify_block_ssse3(input: &[u8], offset: usize) -> ByteClasses {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "ssse3")]
+unsafe fn byte_eq_block_mask_ssse3(input: &[u8], offset: usize, byte: u8) -> u64 {
+    use std::arch::x86_64::*;
+
+    let bytes = unsafe { _mm_loadu_si128(input.as_ptr().add(offset).cast::<__m128i>()) };
+    eq_bitmask(bytes, byte)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "ssse3")]
+unsafe fn tag_end_block_mask_ssse3(input: &[u8], offset: usize) -> u64 {
+    use std::arch::x86_64::*;
+
+    let bytes = unsafe { _mm_loadu_si128(input.as_ptr().add(offset).cast::<__m128i>()) };
+    eq_bitmask(bytes, b'"') | eq_bitmask(bytes, b'\'') | eq_bitmask(bytes, b'>')
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "ssse3")]
 fn eq_bitmask(bytes: std::arch::x86_64::__m128i, byte: u8) -> u64 {
     use std::arch::x86_64::*;
 
@@ -182,7 +269,7 @@ pub fn extract_class_spans_with<C: ByteClassifier>(input: &[u8]) -> Vec<ClassSpa
                     continue;
                 }
 
-                let tag_end = find_tag_end(input, pos);
+                let tag_end = find_tag_end::<C>(input, pos);
                 parse_tag_for_class_attrs(input, pos, tag_end, &mut spans);
                 pos = tag_end.saturating_add(1);
             }
@@ -231,10 +318,10 @@ pub struct ClassToken<'a> {
 
 fn find_next_lt<C: ByteClassifier>(input: &[u8], mut pos: usize) -> Option<usize> {
     while pos + C::LANES <= input.len() {
-        let classes = C::classify_block(input, pos);
+        let lt = C::lt_block_mask(input, pos);
 
-        if classes.lt != 0 {
-            return Some(pos + classes.lt.trailing_zeros() as usize);
+        if lt != 0 {
+            return Some(pos + lt.trailing_zeros() as usize);
         }
 
         pos += C::LANES;
@@ -248,10 +335,10 @@ fn find_next_lt<C: ByteClassifier>(input: &[u8], mut pos: usize) -> Option<usize
 
 fn skip_until_gt<C: ByteClassifier>(input: &[u8], mut pos: usize) -> usize {
     while pos + C::LANES <= input.len() {
-        let classes = C::classify_block(input, pos);
+        let gt = C::gt_block_mask(input, pos);
 
-        if classes.gt != 0 {
-            return pos + classes.gt.trailing_zeros() as usize;
+        if gt != 0 {
+            return pos + gt.trailing_zeros() as usize;
         }
 
         pos += C::LANES;
@@ -264,17 +351,47 @@ fn skip_until_gt<C: ByteClassifier>(input: &[u8], mut pos: usize) -> usize {
         .unwrap_or(input.len())
 }
 
-fn find_tag_end(input: &[u8], mut pos: usize) -> usize {
-    let mut quote = None;
+fn find_tag_end<C: ByteClassifier>(input: &[u8], mut pos: usize) -> usize {
+    let mut quote = 0;
+
+    while pos + C::LANES <= input.len() {
+        let mut interesting = C::tag_end_block_mask(input, pos);
+
+        while interesting != 0 {
+            let lane = interesting.trailing_zeros() as usize;
+            let idx = pos + lane;
+            let b = input[idx];
+
+            match quote {
+                0 => match b {
+                    b'"' | b'\'' => quote = b,
+                    b'>' => return idx,
+                    _ => {}
+                },
+                q if b == q => quote = 0,
+                _ => {}
+            }
+
+            interesting &= interesting - 1;
+        }
+
+        pos += C::LANES;
+    }
+
+    find_tag_end_scalar_tail(input, pos, quote)
+}
+
+fn find_tag_end_scalar_tail(input: &[u8], mut pos: usize, mut quote: u8) -> usize {
+    debug_assert!(quote == 0 || quote == b'"' || quote == b'\'');
 
     while pos < input.len() {
         let b = input[pos];
 
         match quote {
-            Some(q) if b == q => quote = None,
-            Some(_) => {}
-            None => match b {
-                b'"' | b'\'' => quote = Some(b),
+            q if q != 0 && b == q => quote = 0,
+            q if q != 0 => {}
+            _ => match b {
+                b'"' | b'\'' => quote = b,
                 b'>' => return pos,
                 _ => {}
             },
@@ -481,6 +598,17 @@ mod tests {
     #[test]
     fn quoted_gt_does_not_end_tag() {
         let html = br#"<div title="2 > 1" class="ok"></div>"#;
+
+        let spans = extract_class_spans_with::<DefaultClassifier>(html);
+        let values = span_values(html, &spans);
+
+        assert_eq!(values, vec!["ok"]);
+    }
+
+    #[test]
+    fn long_quoted_attr_uses_later_tag_end() {
+        let html =
+            br#"<div title="0123456789abcdef > still quoted" data-x="another > value" class=ok></div>"#;
 
         let spans = extract_class_spans_with::<DefaultClassifier>(html);
         let values = span_values(html, &spans);
