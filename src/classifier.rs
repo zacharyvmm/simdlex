@@ -37,6 +37,7 @@ pub struct ScalarClassifier;
 impl ByteClassifier for ScalarClassifier {
     const LANES: usize = 16;
 
+    #[inline]
     fn classify_block(input: &[u8], offset: usize) -> ByteClasses {
         debug_assert!(offset + Self::LANES <= input.len());
 
@@ -126,9 +127,14 @@ fn scalar_byte_mask(input: &[u8], offset: usize, lanes: usize, byte: u8) -> u64 
 pub struct RawSimdClassifier;
 
 #[cfg(target_arch = "x86_64")]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Ssse3Classifier;
+
+#[cfg(target_arch = "x86_64")]
 impl ByteClassifier for RawSimdClassifier {
     const LANES: usize = 16;
 
+    #[inline]
     fn classify_block(input: &[u8], offset: usize) -> ByteClasses {
         debug_assert!(offset + Self::LANES <= input.len());
 
@@ -168,6 +174,33 @@ impl ByteClassifier for RawSimdClassifier {
 }
 
 #[cfg(target_arch = "x86_64")]
+impl ByteClassifier for Ssse3Classifier {
+    const LANES: usize = 16;
+
+    #[inline]
+    fn classify_block(input: &[u8], offset: usize) -> ByteClasses {
+        debug_assert!(offset + Self::LANES <= input.len());
+
+        unsafe { classify_block_ssse3(input, offset) }
+    }
+
+    #[inline]
+    fn lt_block_mask(input: &[u8], offset: usize) -> u64 {
+        unsafe { byte_eq_block_mask_ssse3(input, offset, b'<') }
+    }
+
+    #[inline]
+    fn gt_block_mask(input: &[u8], offset: usize) -> u64 {
+        unsafe { byte_eq_block_mask_ssse3(input, offset, b'>') }
+    }
+
+    #[inline]
+    fn tag_end_block_mask(input: &[u8], offset: usize) -> u64 {
+        unsafe { tag_end_block_mask_ssse3(input, offset) }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
 const TLO: [u8; 16] = [8, 0, 1, 0, 0, 0, 0, 1, 0, 4, 4, 0, 2, 6, 2, 0];
 
 #[cfg(target_arch = "x86_64")]
@@ -180,6 +213,7 @@ const STRUCTURAL_BITS: u8 = 1 | 2;
 const WHITESPACE_BITS: u8 = 4 | 8;
 
 #[cfg(target_arch = "x86_64")]
+#[inline]
 #[target_feature(enable = "ssse3")]
 unsafe fn classify_block_ssse3(input: &[u8], offset: usize) -> ByteClasses {
     use std::arch::x86_64::*;
@@ -212,6 +246,7 @@ unsafe fn classify_block_ssse3(input: &[u8], offset: usize) -> ByteClasses {
 }
 
 #[cfg(target_arch = "x86_64")]
+#[inline]
 #[target_feature(enable = "ssse3")]
 unsafe fn byte_eq_block_mask_ssse3(input: &[u8], offset: usize, byte: u8) -> u64 {
     use std::arch::x86_64::*;
@@ -221,6 +256,7 @@ unsafe fn byte_eq_block_mask_ssse3(input: &[u8], offset: usize, byte: u8) -> u64
 }
 
 #[cfg(target_arch = "x86_64")]
+#[inline]
 #[target_feature(enable = "ssse3")]
 unsafe fn tag_end_block_mask_ssse3(input: &[u8], offset: usize) -> u64 {
     use std::arch::x86_64::*;
@@ -230,6 +266,7 @@ unsafe fn tag_end_block_mask_ssse3(input: &[u8], offset: usize) -> u64 {
 }
 
 #[cfg(target_arch = "x86_64")]
+#[inline]
 #[target_feature(enable = "ssse3")]
 fn eq_bitmask(bytes: std::arch::x86_64::__m128i, byte: u8) -> u64 {
     use std::arch::x86_64::*;
@@ -240,6 +277,7 @@ fn eq_bitmask(bytes: std::arch::x86_64::__m128i, byte: u8) -> u64 {
 }
 
 #[cfg(target_arch = "x86_64")]
+#[inline]
 #[target_feature(enable = "ssse3")]
 fn nonzero_bitmask(bytes: std::arch::x86_64::__m128i) -> u64 {
     use std::arch::x86_64::*;

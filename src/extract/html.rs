@@ -1,9 +1,16 @@
-use crate::classifier::{ByteClassifier, DefaultClassifier};
+use crate::classifier::{ByteClassifier, ScalarClassifier};
 use crate::spans::ClassSpan;
 use crate::split::is_html_ws;
 
 pub fn extract_class_spans(input: &[u8]) -> Vec<ClassSpan> {
-    extract_class_spans_with::<DefaultClassifier>(input)
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("ssse3") {
+            return extract_class_spans_with::<crate::classifier::Ssse3Classifier>(input);
+        }
+    }
+
+    extract_class_spans_with::<ScalarClassifier>(input)
 }
 
 #[inline]
@@ -277,7 +284,7 @@ mod tests {
             </div>
         "#;
 
-        let spans = extract_class_spans_with::<DefaultClassifier>(html);
+        let spans = extract_class_spans(html);
         let values = span_values(html, &spans);
 
         assert_eq!(
@@ -294,7 +301,7 @@ mod tests {
     fn ignores_comments_closing_tags_and_non_class_attrs() {
         let html = br#"<!-- <div class="ignored"> --><div data-class="no" class = 'yes'></div>"#;
 
-        let spans = extract_class_spans_with::<DefaultClassifier>(html);
+        let spans = extract_class_spans(html);
         let values = span_values(html, &spans);
 
         assert_eq!(values, vec!["yes"]);
@@ -304,7 +311,7 @@ mod tests {
     fn quoted_gt_does_not_end_tag() {
         let html = br#"<div title="2 > 1" class="ok"></div>"#;
 
-        let spans = extract_class_spans_with::<DefaultClassifier>(html);
+        let spans = extract_class_spans(html);
         let values = span_values(html, &spans);
 
         assert_eq!(values, vec!["ok"]);
@@ -315,7 +322,7 @@ mod tests {
         let html =
             br#"<div title="0123456789abcdef > still quoted" data-x="another > value" class=ok></div>"#;
 
-        let spans = extract_class_spans_with::<DefaultClassifier>(html);
+        let spans = extract_class_spans(html);
         let values = span_values(html, &spans);
 
         assert_eq!(values, vec!["ok"]);

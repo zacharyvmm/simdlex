@@ -1,5 +1,6 @@
 use crate::spans::{ClassSpan, ClassToken};
 
+#[inline]
 pub fn split_class_tokens<'a>(source: &'a [u8], span: ClassSpan) -> Vec<ClassToken<'a>> {
     let mut out = Vec::new();
     let mut pos = span.value_start;
