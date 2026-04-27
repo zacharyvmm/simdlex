@@ -1,5 +1,8 @@
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use simdlex::{ByteClassifier, ScalarClassifier, extract_class_spans, split_class_tokens};
+use simdlex::{
+    ByteClassifier, ScalarClassifier, build_structural_index_with, extract_class_spans,
+    split_class_tokens,
+};
 
 #[cfg(target_arch = "x86_64")]
 use simdlex::RawSimdClassifier;
@@ -40,6 +43,26 @@ fn bench_classify_blocks(c: &mut Criterion) {
 
     #[cfg(target_arch = "x86_64")]
     bench_classifier::<RawSimdClassifier>(&mut group, "raw_simd", &input);
+
+    group.finish();
+}
+
+fn bench_build_structural_index(c: &mut Criterion) {
+    let mut group = c.benchmark_group("stage1/build_structural_index");
+
+    for size in [32, 512, 8_192] {
+        let input = fixture(size);
+        group.throughput(Throughput::Bytes(input.len() as u64));
+
+        group.bench_with_input(BenchmarkId::new("scalar", size), &input, |b, input| {
+            b.iter(|| build_structural_index_with::<ScalarClassifier>(black_box(input)));
+        });
+
+        #[cfg(target_arch = "x86_64")]
+        group.bench_with_input(BenchmarkId::new("raw_simd", size), &input, |b, input| {
+            b.iter(|| build_structural_index_with::<RawSimdClassifier>(black_box(input)));
+        });
+    }
 
     group.finish();
 }
@@ -89,6 +112,7 @@ criterion_group!(
     benches,
     bench_extract_class_spans,
     bench_split_class_tokens,
-    bench_classify_blocks
+    bench_classify_blocks,
+    bench_build_structural_index
 );
 criterion_main!(benches);

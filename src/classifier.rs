@@ -75,6 +75,10 @@ impl ByteClassifier for ScalarClassifier {
                     out.structural |= bit;
                     out.eq |= bit;
                 }
+                b'/' | b'`' | b'(' | b')' | b'{' | b'}' | b'[' | b']' | b'.' | b':' | b','
+                | b';' => {
+                    out.structural |= bit;
+                }
                 b'\t' | b'\n' | b'\r' | b' ' => {
                     out.whitespace |= bit;
                 }
@@ -207,9 +211,6 @@ const TLO: [u8; 16] = [8, 0, 1, 0, 0, 0, 0, 1, 0, 4, 4, 0, 2, 6, 2, 0];
 const THI: [u8; 16] = [4, 0, 9, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
 #[cfg(target_arch = "x86_64")]
-const STRUCTURAL_BITS: u8 = 1 | 2;
-
-#[cfg(target_arch = "x86_64")]
 const WHITESPACE_BITS: u8 = 4 | 8;
 
 #[cfg(target_arch = "x86_64")]
@@ -231,8 +232,8 @@ unsafe fn classify_block_ssse3(input: &[u8], offset: usize) -> ByteClasses {
     let hi_class = _mm_shuffle_epi8(thi, hi);
     let class = _mm_and_si128(lo_class, hi_class);
 
-    let structural = nonzero_bitmask(_mm_and_si128(class, _mm_set1_epi8(STRUCTURAL_BITS as i8)));
     let whitespace = nonzero_bitmask(_mm_and_si128(class, _mm_set1_epi8(WHITESPACE_BITS as i8)));
+    let structural = structural_bitmask_ssse3(bytes);
 
     ByteClasses {
         structural,
@@ -263,6 +264,29 @@ unsafe fn tag_end_block_mask_ssse3(input: &[u8], offset: usize) -> u64 {
 
     let bytes = unsafe { _mm_loadu_si128(input.as_ptr().add(offset).cast::<__m128i>()) };
     eq_bitmask(bytes, b'"') | eq_bitmask(bytes, b'\'') | eq_bitmask(bytes, b'>')
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+#[target_feature(enable = "ssse3")]
+fn structural_bitmask_ssse3(bytes: std::arch::x86_64::__m128i) -> u64 {
+    eq_bitmask(bytes, b'<')
+        | eq_bitmask(bytes, b'>')
+        | eq_bitmask(bytes, b'/')
+        | eq_bitmask(bytes, b'=')
+        | eq_bitmask(bytes, b'\'')
+        | eq_bitmask(bytes, b'"')
+        | eq_bitmask(bytes, b'`')
+        | eq_bitmask(bytes, b'(')
+        | eq_bitmask(bytes, b')')
+        | eq_bitmask(bytes, b'{')
+        | eq_bitmask(bytes, b'}')
+        | eq_bitmask(bytes, b'[')
+        | eq_bitmask(bytes, b']')
+        | eq_bitmask(bytes, b'.')
+        | eq_bitmask(bytes, b':')
+        | eq_bitmask(bytes, b',')
+        | eq_bitmask(bytes, b';')
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -330,6 +354,28 @@ mod tests {
         assert_eq!(
             classes.structural,
             (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5)
+        );
+    }
+
+    #[test]
+    fn scalar_classifier_marks_stage1_structural_bytes() {
+        let input = b"/`(){}[].:,;abcd";
+        let classes = ScalarClassifier::classify_block(input, 0);
+
+        assert_eq!(
+            classes.structural,
+            (1 << 0)
+                | (1 << 1)
+                | (1 << 2)
+                | (1 << 3)
+                | (1 << 4)
+                | (1 << 5)
+                | (1 << 6)
+                | (1 << 7)
+                | (1 << 8)
+                | (1 << 9)
+                | (1 << 10)
+                | (1 << 11)
         );
     }
 }

@@ -2,6 +2,7 @@ pub mod classifier;
 pub mod extract;
 pub mod spans;
 pub mod split;
+pub mod stage1;
 
 pub use classifier::{ByteClasses, ByteClassifier, DefaultClassifier, ScalarClassifier};
 pub use extract::{
@@ -13,6 +14,10 @@ pub use spans::{
     DiagnosticKind, Document, DocumentKind, ExtractOptions, ExtractResult, Span,
 };
 pub use split::{split_candidate_tokens, split_class_tokens};
+pub use stage1::{
+    Structural, StructuralIndex, StructuralKind, build_structural_index,
+    build_structural_index_with,
+};
 
 #[cfg(target_arch = "x86_64")]
 pub use classifier::RawSimdClassifier;
