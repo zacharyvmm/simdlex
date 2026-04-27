@@ -1,18 +1,35 @@
-use crate::spans::{ClassSpan, ClassToken};
+use crate::spans::{CandidateOrigin, ClassCandidate, ClassSpan, ClassToken, Span};
 
 #[inline]
 pub fn split_class_tokens<'a>(source: &'a [u8], span: ClassSpan) -> Vec<ClassToken<'a>> {
-    let mut out = Vec::new();
-    let mut pos = span.value_start;
+    split_span_tokens(source, span.into(), CandidateOrigin::HtmlAttribute)
+}
 
-    while pos < span.value_end {
-        while pos < span.value_end && is_html_ws(source[pos]) {
+#[inline]
+pub fn split_candidate_tokens<'a>(
+    source: &'a [u8],
+    candidate: ClassCandidate,
+) -> Vec<ClassToken<'a>> {
+    split_span_tokens(source, candidate.value, candidate.origin)
+}
+
+#[inline]
+fn split_span_tokens<'a>(
+    source: &'a [u8],
+    span: Span,
+    origin: CandidateOrigin,
+) -> Vec<ClassToken<'a>> {
+    let mut out = Vec::new();
+    let mut pos = span.start;
+
+    while pos < span.end {
+        while pos < span.end && is_html_ws(source[pos]) {
             pos += 1;
         }
 
         let token_start = pos;
 
-        while pos < span.value_end && !is_html_ws(source[pos]) {
+        while pos < span.end && !is_html_ws(source[pos]) {
             pos += 1;
         }
 
@@ -21,8 +38,11 @@ pub fn split_class_tokens<'a>(source: &'a [u8], span: ClassSpan) -> Vec<ClassTok
         {
             out.push(ClassToken {
                 text,
-                start: token_start,
-                end: pos,
+                span: Span {
+                    start: token_start,
+                    end: pos,
+                },
+                origin,
             });
         }
     }
@@ -51,6 +71,9 @@ mod tests {
             tokens.iter().map(|token| token.text).collect::<Vec<_>>(),
             vec!["a", "hover:bg-blue-500", "p-4"]
         );
-        assert_eq!(&html[tokens[1].start..tokens[1].end], b"hover:bg-blue-500");
+        assert_eq!(
+            &html[tokens[1].span.start..tokens[1].span.end],
+            b"hover:bg-blue-500"
+        );
     }
 }
