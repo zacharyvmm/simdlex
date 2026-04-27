@@ -3,6 +3,7 @@ pub mod extract;
 pub mod spans;
 pub mod split;
 pub mod stage1;
+pub mod stage2;
 
 pub use classifier::{ByteClasses, ByteClassifier, DefaultClassifier, ScalarClassifier};
 pub use extract::{

@@ -1,7 +1,8 @@
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use simdlex::{
-    ByteClassifier, ScalarClassifier, build_structural_index_with, extract_class_spans,
-    split_class_tokens,
+    ByteClassifier, DocumentKind, ExtractOptions, ScalarClassifier, build_structural_index,
+    build_structural_index_with, extract_candidates, extract_class_spans, split_class_tokens,
+    stage2,
 };
 
 #[cfg(target_arch = "x86_64")]
@@ -67,6 +68,43 @@ fn bench_build_structural_index(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_stage2_html_candidates(c: &mut Criterion) {
+    let mut group = c.benchmark_group("stage2/html_candidates/from_index");
+    let options = ExtractOptions::default();
+
+    for size in [32, 512, 8_192] {
+        let input = fixture(size);
+        let index = build_structural_index(&input);
+        group.throughput(Throughput::Bytes(input.len() as u64));
+
+        group.bench_with_input(BenchmarkId::from_parameter(size), &input, |b, input| {
+            b.iter(|| {
+                stage2::html::parse(black_box(input), black_box(&index), black_box(&options))
+            });
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_extract_candidates_html(c: &mut Criterion) {
+    let mut group = c.benchmark_group("pipeline/extract_candidates/html");
+    let options = ExtractOptions::default();
+
+    for size in [32, 512, 8_192] {
+        let input = fixture(size);
+        group.throughput(Throughput::Bytes(input.len() as u64));
+
+        group.bench_with_input(BenchmarkId::from_parameter(size), &input, |b, input| {
+            b.iter(|| {
+                extract_candidates(black_box(input), DocumentKind::Html, black_box(&options))
+            });
+        });
+    }
+
+    group.finish();
+}
+
 fn bench_classifier<C: ByteClassifier>(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
     name: &str,
@@ -113,6 +151,8 @@ criterion_group!(
     bench_extract_class_spans,
     bench_split_class_tokens,
     bench_classify_blocks,
-    bench_build_structural_index
+    bench_build_structural_index,
+    bench_stage2_html_candidates,
+    bench_extract_candidates_html
 );
 criterion_main!(benches);
