@@ -1,27 +1,29 @@
-pub mod classifier;
+mod backend;
+
 pub mod extract;
+pub mod grammar;
+mod parser;
 pub mod spans;
 pub mod split;
-pub mod stage1;
-pub mod stage2;
 
-pub use classifier::{ByteClasses, ByteClassifier, DefaultClassifier, ScalarClassifier};
+pub use backend::ClassifiedBlock;
 pub use extract::{
-    extract_candidates, extract_class_tokens, extract_tokens,
-    html::{extract_class_spans, extract_class_spans_with},
+    extract_candidates, extract_class_tokens, extract_tokens, html::extract_class_spans,
 };
+pub use grammar::{
+    Grammar, HtmlConfig, HtmlEmit, HtmlError, HtmlErrorKind, HtmlEvent, HtmlGrammar,
+    HtmlStage1State, NibbleTables, Utf8Policy,
+};
+#[cfg(any(feature = "json-test-grammar", test))]
+pub use grammar::{
+    JsonConfig, JsonError, JsonErrorKind, JsonEvent, JsonGrammar, RawJsonString, decode_json_string,
+};
+pub use parser::{BackendError, BackendKind, CapacityError, ParseStats, Parser, Stage1Stats};
 pub use spans::{
     CandidateOrigin, CandidateSyntax, ClassCandidate, ClassSpan, ClassToken, Diagnostic,
     DiagnosticKind, Document, DocumentKind, ExtractOptions, ExtractResult, Span,
 };
 pub use split::{split_candidate_tokens, split_class_tokens};
-pub use stage1::{
-    Structural, StructuralIndex, StructuralKind, build_structural_index,
-    build_structural_index_with,
-};
-
-#[cfg(target_arch = "x86_64")]
-pub use classifier::RawSimdClassifier;
 
 #[cfg(test)]
 mod tests {

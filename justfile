@@ -11,3 +11,12 @@ lint:
 
 build:
     cargo build --release
+
+bench:
+    cargo bench
+
+bench-grammars:
+    cargo bench --features json-test-grammar --bench grammar_parser
+
+bench-reference:
+    tools/simdjson-reference.sh

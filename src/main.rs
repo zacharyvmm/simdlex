@@ -7,7 +7,8 @@ fn main() {
     "#;
 
     for span in simdlex::extract_class_spans(html) {
-        let value = std::str::from_utf8(&html[span.value_start..span.value_end]).unwrap();
+        let value =
+            std::str::from_utf8(&html[span.value_start as usize..span.value_end as usize]).unwrap();
         println!("{value}");
     }
 }

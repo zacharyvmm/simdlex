@@ -416,6 +416,7 @@ name = "simdlex"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "serde_json",
 ]
 
 [[package]]

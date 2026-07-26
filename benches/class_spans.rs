@@ -1,12 +1,8 @@
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use simdlex::{
-    ByteClassifier, DocumentKind, ExtractOptions, ScalarClassifier, build_structural_index,
-    build_structural_index_with, extract_candidates, extract_class_spans, split_class_tokens,
-    stage2,
+    BackendKind, DocumentKind, ExtractOptions, HtmlConfig, HtmlGrammar, Parser, extract_candidates,
+    extract_class_spans, split_class_tokens,
 };
-
-#[cfg(target_arch = "x86_64")]
-use simdlex::RawSimdClassifier;
 
 fn bench_extract_class_spans(c: &mut Criterion) {
     let mut group = c.benchmark_group("extract_class_spans");
@@ -35,54 +31,21 @@ fn bench_split_class_tokens(c: &mut Criterion) {
     });
 }
 
-fn bench_classify_blocks(c: &mut Criterion) {
+fn bench_html_stage1(c: &mut Criterion) {
     let input = fixture(8_192);
-    let mut group = c.benchmark_group("classify_blocks");
+    let mut group = c.benchmark_group("stage1/html");
     group.throughput(Throughput::Bytes(input.len() as u64));
 
-    bench_classifier::<ScalarClassifier>(&mut group, "scalar", &input);
+    let mut scalar =
+        Parser::<HtmlGrammar>::with_backend(HtmlConfig::default(), BackendKind::Scalar).unwrap();
+    group.bench_function("scalar", |b| {
+        b.iter(|| scalar.stage1(black_box(&input)));
+    });
 
-    #[cfg(target_arch = "x86_64")]
-    bench_classifier::<RawSimdClassifier>(&mut group, "raw_simd", &input);
-
-    group.finish();
-}
-
-fn bench_build_structural_index(c: &mut Criterion) {
-    let mut group = c.benchmark_group("stage1/build_structural_index");
-
-    for size in [32, 512, 8_192] {
-        let input = fixture(size);
-        group.throughput(Throughput::Bytes(input.len() as u64));
-
-        group.bench_with_input(BenchmarkId::new("scalar", size), &input, |b, input| {
-            b.iter(|| build_structural_index_with::<ScalarClassifier>(black_box(input)));
-        });
-
-        #[cfg(target_arch = "x86_64")]
-        group.bench_with_input(BenchmarkId::new("raw_simd", size), &input, |b, input| {
-            b.iter(|| build_structural_index_with::<RawSimdClassifier>(black_box(input)));
-        });
-    }
-
-    group.finish();
-}
-
-fn bench_stage2_html_candidates(c: &mut Criterion) {
-    let mut group = c.benchmark_group("stage2/html_candidates/from_index");
-    let options = ExtractOptions::default();
-
-    for size in [32, 512, 8_192] {
-        let input = fixture(size);
-        let index = build_structural_index(&input);
-        group.throughput(Throughput::Bytes(input.len() as u64));
-
-        group.bench_with_input(BenchmarkId::from_parameter(size), &input, |b, input| {
-            b.iter(|| {
-                stage2::html::parse(black_box(input), black_box(&index), black_box(&options))
-            });
-        });
-    }
+    let mut automatic = Parser::<HtmlGrammar>::new(HtmlConfig::default());
+    group.bench_function("auto", |b| {
+        b.iter(|| automatic.stage1(black_box(&input)));
+    });
 
     group.finish();
 }
@@ -103,29 +66,6 @@ fn bench_extract_candidates_html(c: &mut Criterion) {
     }
 
     group.finish();
-}
-
-fn bench_classifier<C: ByteClassifier>(
-    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
-    name: &str,
-    input: &[u8],
-) {
-    let len = input.len() - input.len() % C::LANES;
-
-    group.bench_function(name, |b| {
-        b.iter(|| {
-            let mut structural = 0u64;
-            let mut whitespace = 0u64;
-
-            for offset in (0..len).step_by(C::LANES) {
-                let classes = C::classify_block(black_box(input), offset);
-                structural ^= classes.structural;
-                whitespace ^= classes.whitespace;
-            }
-
-            black_box((structural, whitespace));
-        });
-    });
 }
 
 fn fixture(repetitions: usize) -> Vec<u8> {
@@ -150,9 +90,7 @@ criterion_group!(
     benches,
     bench_extract_class_spans,
     bench_split_class_tokens,
-    bench_classify_blocks,
-    bench_build_structural_index,
-    bench_stage2_html_candidates,
+    bench_html_stage1,
     bench_extract_candidates_html
 );
 criterion_main!(benches);

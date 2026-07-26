@@ -20,16 +20,17 @@ fn split_span_tokens<'a>(
     origin: CandidateOrigin,
 ) -> Vec<ClassToken<'a>> {
     let mut out = Vec::new();
-    let mut pos = span.start;
+    let mut pos = span.start as usize;
+    let end = span.end as usize;
 
-    while pos < span.end {
-        while pos < span.end && is_html_ws(source[pos]) {
+    while pos < end {
+        while pos < end && is_html_ws(source[pos]) {
             pos += 1;
         }
 
         let token_start = pos;
 
-        while pos < span.end && !is_html_ws(source[pos]) {
+        while pos < end && !is_html_ws(source[pos]) {
             pos += 1;
         }
 
@@ -39,8 +40,8 @@ fn split_span_tokens<'a>(
             out.push(ClassToken {
                 text,
                 span: Span {
-                    start: token_start,
-                    end: pos,
+                    start: token_start as u32,
+                    end: pos as u32,
                 },
                 origin,
             });
@@ -58,13 +59,13 @@ pub(crate) fn is_html_ws(b: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DefaultClassifier, extract_class_spans_with};
+    use crate::extract_class_spans;
 
     #[test]
     fn splits_class_tokens_with_offsets() {
         let html = br#"<div class="  a  hover:bg-blue-500
             p-4 "></div>"#;
-        let span = extract_class_spans_with::<DefaultClassifier>(html)[0];
+        let span = extract_class_spans(html)[0];
         let tokens = split_class_tokens(html, span);
 
         assert_eq!(
@@ -72,7 +73,7 @@ mod tests {
             vec!["a", "hover:bg-blue-500", "p-4"]
         );
         assert_eq!(
-            &html[tokens[1].span.start..tokens[1].span.end],
+            &html[tokens[1].span.start as usize..tokens[1].span.end as usize],
             b"hover:bg-blue-500"
         );
     }

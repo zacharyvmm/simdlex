@@ -1,0 +1,36 @@
+[package]
+name = "simdlex-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+simdlex = { path = "..", features = ["json-test-grammar"] }
+
+[[bin]]
+name = "json_stage1_backends"
+path = "fuzz_targets/json_stage1_backends.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "json_differential"
+path = "fuzz_targets/json_differential.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "html_backends"
+path = "fuzz_targets/html_backends.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

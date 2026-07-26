@@ -1,13 +1,13 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Span {
-    pub start: usize,
-    pub end: usize,
+    pub start: u32,
+    pub end: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClassSpan {
-    pub value_start: usize,
-    pub value_end: usize,
+    pub value_start: u32,
+    pub value_end: u32,
 }
 
 impl From<ClassSpan> for Span {
