@@ -205,13 +205,19 @@ impl ByteClassifier for Ssse3Classifier {
 }
 
 #[cfg(target_arch = "x86_64")]
-const TLO: [u8; 16] = [8, 0, 1, 0, 0, 0, 0, 1, 0, 4, 4, 0, 2, 6, 2, 0];
+// Each structural high nibble owns one of bits 0..=4. Whitespace uses
+// bits 5..=6. Intersecting the two shuffled tables therefore classifies
+// all supported bytes without comparing against every byte separately.
+const CLASS_LO: [u8; 16] = [72, 0, 1, 0, 0, 0, 0, 1, 1, 33, 34, 22, 3, 54, 3, 1];
 
 #[cfg(target_arch = "x86_64")]
-const THI: [u8; 16] = [4, 0, 9, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+const CLASS_HI: [u8; 16] = [32, 0, 65, 2, 0, 4, 8, 16, 0, 0, 0, 0, 0, 0, 0, 0];
 
 #[cfg(target_arch = "x86_64")]
-const WHITESPACE_BITS: u8 = 4 | 8;
+const STRUCTURAL_BITS: u8 = 1 | 2 | 4 | 8 | 16;
+
+#[cfg(target_arch = "x86_64")]
+const WHITESPACE_BITS: u8 = 32 | 64;
 
 #[cfg(target_arch = "x86_64")]
 #[inline]
@@ -225,15 +231,15 @@ unsafe fn classify_block_ssse3(input: &[u8], offset: usize) -> ByteClasses {
     let lo = _mm_and_si128(bytes, lo_mask);
     let hi = _mm_and_si128(_mm_srli_epi16(bytes, 4), lo_mask);
 
-    let tlo = unsafe { _mm_loadu_si128(TLO.as_ptr().cast::<__m128i>()) };
-    let thi = unsafe { _mm_loadu_si128(THI.as_ptr().cast::<__m128i>()) };
+    let tlo = unsafe { _mm_loadu_si128(CLASS_LO.as_ptr().cast::<__m128i>()) };
+    let thi = unsafe { _mm_loadu_si128(CLASS_HI.as_ptr().cast::<__m128i>()) };
 
     let lo_class = _mm_shuffle_epi8(tlo, lo);
     let hi_class = _mm_shuffle_epi8(thi, hi);
     let class = _mm_and_si128(lo_class, hi_class);
 
+    let structural = nonzero_bitmask(_mm_and_si128(class, _mm_set1_epi8(STRUCTURAL_BITS as i8)));
     let whitespace = nonzero_bitmask(_mm_and_si128(class, _mm_set1_epi8(WHITESPACE_BITS as i8)));
-    let structural = structural_bitmask_ssse3(bytes);
 
     ByteClasses {
         structural,
@@ -264,29 +270,6 @@ unsafe fn tag_end_block_mask_ssse3(input: &[u8], offset: usize) -> u64 {
 
     let bytes = unsafe { _mm_loadu_si128(input.as_ptr().add(offset).cast::<__m128i>()) };
     eq_bitmask(bytes, b'"') | eq_bitmask(bytes, b'\'') | eq_bitmask(bytes, b'>')
-}
-
-#[cfg(target_arch = "x86_64")]
-#[inline]
-#[target_feature(enable = "ssse3")]
-fn structural_bitmask_ssse3(bytes: std::arch::x86_64::__m128i) -> u64 {
-    eq_bitmask(bytes, b'<')
-        | eq_bitmask(bytes, b'>')
-        | eq_bitmask(bytes, b'/')
-        | eq_bitmask(bytes, b'=')
-        | eq_bitmask(bytes, b'\'')
-        | eq_bitmask(bytes, b'"')
-        | eq_bitmask(bytes, b'`')
-        | eq_bitmask(bytes, b'(')
-        | eq_bitmask(bytes, b')')
-        | eq_bitmask(bytes, b'{')
-        | eq_bitmask(bytes, b'}')
-        | eq_bitmask(bytes, b'[')
-        | eq_bitmask(bytes, b']')
-        | eq_bitmask(bytes, b'.')
-        | eq_bitmask(bytes, b':')
-        | eq_bitmask(bytes, b',')
-        | eq_bitmask(bytes, b';')
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -336,6 +319,24 @@ mod tests {
         let simd = RawSimdClassifier::classify_block(input, 0);
 
         assert_eq!(simd, scalar);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn raw_simd_classifier_matches_scalar_for_every_byte() {
+        if !std::is_x86_feature_detected!("ssse3") {
+            return;
+        }
+
+        let input: Vec<u8> = (u8::MIN..=u8::MAX).collect();
+
+        for offset in (0..input.len()).step_by(RawSimdClassifier::LANES) {
+            assert_eq!(
+                RawSimdClassifier::classify_block(&input, offset),
+                ScalarClassifier::classify_block(&input, offset),
+                "classifier mismatch in block starting at byte {offset}"
+            );
+        }
     }
 
     fn assert_classifier<C: ByteClassifier>() {
