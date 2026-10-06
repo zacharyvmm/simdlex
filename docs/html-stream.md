@@ -3,7 +3,7 @@
 > Experimental. Flat events only: no tree construction, tag balancing, or
 > implied tags.
 
-`HtmlReader` is a pull parser over the stage-1 delimiter index (`<`, `>`, `=`,
+`HtmlReader` is a pull parser over the stage-1 delimiter index (`<`, `>`,
 `'`, `"`; see [`stage1-index.md`](stage1-index.md)). `HtmlStreamGrammar`
 wraps it for `Parser::parse_with`.
 
@@ -30,7 +30,7 @@ for event in HtmlReader::new(input, parser.index()) {
 | State | Index use |
 |---|---|
 | data | jump to the next `<`; a `<` that does not open markup stays text |
-| tag | names and whitespace are read directly; a quoted value jumps to its closing quote |
+| tag | names, whitespace, and `=` are read directly; a quoted value jumps to its closing quote |
 | comment / DOCTYPE / bogus comment | jump between `>` candidates |
 | raw text (`script`, `style`, `textarea`, `title`, …) | jump between `<` candidates to the matching `</name` |
 
@@ -62,6 +62,6 @@ attribute:
 
 | | throughput |
 |---|---|
-| class candidates (existing extractor) | 788 MiB/s |
+| class candidates (existing extractor) | 826 MiB/s |
 | stream, tape | 407 MiB/s |
-| stream, masks | 390 MiB/s |
+| stream, masks | 384 MiB/s |

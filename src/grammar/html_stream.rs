@@ -1,11 +1,11 @@
 //! A StAX-style HTML element stream: stage 2 over the delimiter index.
 //!
 //! [`HtmlReader`] is a pull parser. It walks the structural offsets produced
-//! by stage 1 (`<`, `>`, `=`, `'`, `"`) and yields flat events. It builds no
+//! by stage 1 (`<`, `>`, `'`, `"`) and yields flat events. It builds no
 //! tree, so it does not balance or imply tags. Text between delimiters is
 //! never examined byte by byte: the reader jumps from one `<` to the next.
-//! Inside a tag it reads names and whitespace directly, and it uses the index
-//! to jump to the closing quote of a quoted attribute value.
+//! Inside a tag it reads names, whitespace, and `=` directly, and it uses the
+//! index to jump to the closing quote of a quoted attribute value.
 //!
 //! Tokenization follows the WHATWG HTML tokenizer for the data, tag,
 //! attribute, comment, DOCTYPE, and bogus-comment states, with these
