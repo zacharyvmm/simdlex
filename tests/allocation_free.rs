@@ -3,7 +3,10 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use simdlex::{HtmlConfig, HtmlEmit, HtmlGrammar, IndexMode, JsonConfig, JsonGrammar, Parser};
+use simdlex::{
+    HtmlConfig, HtmlEmit, HtmlGrammar, IndexMode, JsonConfig, JsonGrammar, Parser, YamlConfig,
+    YamlEvent, YamlGrammar, decode_yaml_scalar,
+};
 
 struct CountingAllocator;
 
@@ -46,15 +49,30 @@ fn bounded_warm_parsers_allocate_nothing() {
         .with_index_mode(IndexMode::Masks)
         .unwrap();
 
+    let yaml = b"a: [1, 'two']\nb:\n  - \"x\\ty\"\n  - |\n    block\nc: folded\n  plain\n";
+    let mut yaml_parser = Parser::<YamlGrammar>::with_capacity(YamlConfig::default(), 256).unwrap();
+    let mut scratch = String::with_capacity(64);
+    let parse_yaml = |parser: &mut Parser<YamlGrammar>, scratch: &mut String| {
+        parser
+            .parse_with(yaml, |event| {
+                if let YamlEvent::Scalar(scalar) = event {
+                    decode_yaml_scalar(&scalar, scratch).unwrap();
+                }
+            })
+            .unwrap();
+    };
+
     json_parser.parse_with(json, |_| {}).unwrap();
     html_parser.parse_with(html, |_| {}).unwrap();
     html_mask_parser.parse_with(html, |_| {}).unwrap();
+    parse_yaml(&mut yaml_parser, &mut scratch);
 
     ALLOCATIONS.store(0, Ordering::Relaxed);
     ENABLED.store(true, Ordering::SeqCst);
     json_parser.parse_with(json, |_| {}).unwrap();
     html_parser.parse_with(html, |_| {}).unwrap();
     html_mask_parser.parse_with(html, |_| {}).unwrap();
+    parse_yaml(&mut yaml_parser, &mut scratch);
     ENABLED.store(false, Ordering::SeqCst);
 
     assert_eq!(ALLOCATIONS.load(Ordering::Relaxed), 0);

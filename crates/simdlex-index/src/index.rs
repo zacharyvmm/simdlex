@@ -234,6 +234,68 @@ impl<'a> MaskView<'a> {
         self.lanes(0)
     }
 
+    /// Union of the classes selected by `classes` (bit `i` selects class
+    /// `i`) in `block`.
+    #[inline]
+    fn union(self, block: usize, classes: u8) -> u64 {
+        let row = &self.masks[block * self.layout.stride() + 1..][..self.layout.classes];
+        let mut union = 0;
+        for (class, mask) in row.iter().enumerate() {
+            if classes & (1 << class) != 0 {
+                union |= mask;
+            }
+        }
+        union
+    }
+
+    /// The first offset at or after `from` that belongs to any class
+    /// selected by `classes` (bit `i` selects class `i`).
+    ///
+    /// This is the mask-mode equivalent of advancing along a tape, but the
+    /// caller chooses which classes to stop at for each search.
+    #[inline]
+    pub fn next_in(self, classes: u8, from: usize) -> Option<usize> {
+        let blocks = self.blocks();
+        let mut block = from / 64;
+        if block >= blocks {
+            return None;
+        }
+        let mut mask = self.union(block, classes) & (u64::MAX << (from % 64));
+        loop {
+            if mask != 0 {
+                return Some(block * 64 + mask.trailing_zeros() as usize);
+            }
+            block += 1;
+            if block >= blocks {
+                return None;
+            }
+            mask = self.union(block, classes);
+        }
+    }
+
+    /// The number of consecutive offsets, starting at `from`, that belong to
+    /// class `class`. With a space class this measures indentation in one
+    /// or two mask reads instead of a byte loop.
+    #[inline]
+    pub fn run_length(self, class: usize, from: usize) -> usize {
+        assert!(class < self.layout.classes);
+        let blocks = self.blocks();
+        let mut block = from / 64;
+        let mut lane = from % 64;
+        let mut run = 0;
+        while block < blocks {
+            let mask = self.masks[block * self.layout.stride() + 1 + class] >> lane;
+            let ones = mask.trailing_ones() as usize;
+            run += ones;
+            if ones < 64 - lane {
+                break;
+            }
+            block += 1;
+            lane = 0;
+        }
+        run
+    }
+
     /// Offsets of the set lanes of class `class`, across all blocks.
     #[inline]
     pub fn class_positions(self, class: usize) -> MaskLanes<'a> {

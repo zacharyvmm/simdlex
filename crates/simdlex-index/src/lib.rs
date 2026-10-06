@@ -350,6 +350,36 @@ mod tests {
     }
 
     #[test]
+    fn mask_searches_match_byte_scans() {
+        let mut input = b"<a  b=c>  \n".repeat(20);
+        input.extend_from_slice(&[b' '; 130]);
+        input.push(b'=');
+        let indexer = Indexer::<Demo>::new();
+        let mut index = StructuralIndex::new();
+        indexer
+            .index(&input, IndexMode::Masks, &mut (), &mut index)
+            .unwrap();
+        let masks = index.view().masks().unwrap();
+
+        for from in 0..=input.len() + 70 {
+            let expected_next = input
+                .iter()
+                .enumerate()
+                .skip(from)
+                .find(|(_, byte)| matches!(byte, b'=' | b' ' | b'\n'))
+                .map(|(offset, _)| offset);
+            assert_eq!(masks.next_in(0b110, from), expected_next, "from {from}");
+
+            let expected_run = input
+                .iter()
+                .skip(from)
+                .take_while(|&&byte| matches!(byte, b' ' | b'\n'))
+                .count();
+            assert_eq!(masks.run_length(2, from), expected_run, "from {from}");
+        }
+    }
+
+    #[test]
     fn reserved_index_is_reused() {
         let indexer = Indexer::<Demo>::new();
         let mut index = StructuralIndex::new();

@@ -10,6 +10,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 serde_json = "1"
+yaml-rust2 = "0.13.0"
 simdlex = { path = "..", features = ["json-test-grammar"] }
 
 [[bin]]
@@ -38,6 +39,13 @@ bench = false
 [[bin]]
 name = "html_stream"
 path = "fuzz_targets/html_stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "yaml_differential"
+path = "fuzz_targets/yaml_differential.rs"
 test = false
 doc = false
 bench = false
