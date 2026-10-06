@@ -1,32 +1,8 @@
 use std::fmt;
 
-use crate::backend::{self, SAFETY_PADDING, Stage1Fn};
+use simdlex_index::{BackendError, BackendKind, IndexMode, IndexView, Indexer, StructuralIndex};
+
 use crate::grammar::Grammar;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BackendKind {
-    Auto,
-    Scalar,
-    Ssse3,
-    Avx2,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BackendError {
-    pub requested: BackendKind,
-}
-
-impl fmt::Display for BackendError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "the {:?} backend is unavailable on this CPU",
-            self.requested
-        )
-    }
-}
-
-impl std::error::Error for BackendError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapacityError {
@@ -50,9 +26,11 @@ impl std::error::Error for CapacityError {}
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Stage1Stats {
     pub input_bytes: usize,
+    pub mode: IndexMode,
     pub structural_count: usize,
-    pub logical_tape_bytes: usize,
-    pub tape_capacity_bytes: usize,
+    /// Logical size of the tape or block masks.
+    pub index_bytes: usize,
+    pub index_capacity_bytes: usize,
     pub blocks: usize,
     pub density: f64,
 }
@@ -65,32 +43,18 @@ pub struct ParseStats {
 
 pub struct Parser<G: Grammar> {
     config: G::Config,
-    tape: Vec<u32>,
-    stage1_state: G::Stage1State,
+    index: StructuralIndex,
+    stage1_state: G::State,
     stage2_state: G::Stage2State,
-    stage1_fn: Stage1Fn<G>,
-    backend: BackendKind,
+    indexer: Indexer<G>,
+    mode: IndexMode,
     max_input: Option<usize>,
 }
 
 impl<G: Grammar> Parser<G> {
     pub fn new(config: G::Config) -> Self {
-        let backend = best_backend();
-        let stage1_fn = stage1_function::<G>(backend)
-            .expect("the automatically selected parser backend must be available");
-        let mut stage2_state = G::Stage2State::default();
-        G::reserve_stage2(&config, &mut stage2_state, false)
-            .expect("infallible parser state reservation failed");
-
-        Self {
-            config,
-            tape: Vec::new(),
-            stage1_state: G::Stage1State::default(),
-            stage2_state,
-            stage1_fn,
-            backend,
-            max_input: None,
-        }
+        Self::with_backend(config, BackendKind::Auto)
+            .expect("the automatically selected parser backend must be available")
     }
 
     pub fn with_capacity(config: G::Config, max_input: usize) -> Result<Self, CapacityError> {
@@ -98,54 +62,65 @@ impl<G: Grammar> Parser<G> {
             return Err(CapacityError::InputTooLarge);
         }
 
-        let backend = best_backend();
-        let stage1_fn = stage1_function::<G>(backend)
-            .expect("the automatically selected parser backend must be available");
-        let requested = max_input
-            .checked_add(SAFETY_PADDING)
-            .ok_or(CapacityError::InputTooLarge)?;
-        let mut tape = Vec::new();
-        tape.try_reserve_exact(requested)
-            .map_err(|_| CapacityError::AllocationFailed { requested })?;
-        let mut stage2_state = G::Stage2State::default();
-        G::reserve_stage2(&config, &mut stage2_state, true)?;
-
-        Ok(Self {
-            config,
-            tape,
-            stage1_state: G::Stage1State::default(),
-            stage2_state,
-            stage1_fn,
-            backend,
-            max_input: Some(max_input),
-        })
+        let mut parser = Self::build(config, Indexer::new(), true)?;
+        parser.max_input = Some(max_input);
+        parser.reserve_index()?;
+        Ok(parser)
     }
 
     pub fn with_backend(config: G::Config, backend: BackendKind) -> Result<Self, BackendError> {
-        let selected = if backend == BackendKind::Auto {
-            best_backend()
-        } else {
-            backend
-        };
-        let stage1_fn = stage1_function::<G>(selected)?;
-        let mut stage2_state = G::Stage2State::default();
-        G::reserve_stage2(&config, &mut stage2_state, false)
-            .expect("infallible parser state reservation failed");
+        let indexer = Indexer::with_backend(backend)?;
+        Ok(
+            Self::build(config, indexer, false)
+                .expect("infallible parser state reservation failed"),
+        )
+    }
 
+    /// Record stage 1 as a tape or as block masks instead of the grammar's
+    /// default [`IndexMode`]. Bounded parsers re-reserve for the new mode.
+    pub fn with_index_mode(mut self, mode: IndexMode) -> Result<Self, CapacityError> {
+        self.mode = mode;
+        if self.max_input.is_some() {
+            self.reserve_index()?;
+        }
+        Ok(self)
+    }
+
+    fn build(
+        config: G::Config,
+        indexer: Indexer<G>,
+        fallible: bool,
+    ) -> Result<Self, CapacityError> {
+        let mut stage2_state = G::Stage2State::default();
+        G::reserve_stage2(&config, &mut stage2_state, fallible)?;
         Ok(Self {
             config,
-            tape: Vec::new(),
-            stage1_state: G::Stage1State::default(),
+            index: StructuralIndex::new(),
+            stage1_state: G::State::default(),
             stage2_state,
-            stage1_fn,
-            backend: selected,
+            indexer,
+            mode: G::MODE,
             max_input: None,
         })
     }
 
+    fn reserve_index(&mut self) -> Result<(), CapacityError> {
+        let max_input = self.max_input.unwrap_or(0);
+        self.index
+            .try_reserve(self.mode, Indexer::<G>::layout(), max_input)
+            .map_err(|_| CapacityError::AllocationFailed {
+                requested: max_input,
+            })
+    }
+
     #[inline]
     pub fn backend(&self) -> BackendKind {
-        self.backend
+        self.indexer.backend()
+    }
+
+    #[inline]
+    pub fn index_mode(&self) -> IndexMode {
+        self.mode
     }
 
     #[inline]
@@ -163,21 +138,17 @@ impl<G: Grammar> Parser<G> {
             return Err(G::capacity_error(max_input as u32));
         }
 
-        self.tape.clear();
-        if self.max_input.is_none() {
-            let needed = input.len().saturating_add(SAFETY_PADDING);
-            if self.tape.capacity() < needed {
-                self.tape.reserve(needed - self.tape.capacity());
-            }
-        }
-
-        let metrics = (self.stage1_fn)(input, &mut self.stage1_state, &mut self.tape)?;
-        let structural_count = self.tape.len();
+        let metrics =
+            self.indexer
+                .index(input, self.mode, &mut self.stage1_state, &mut self.index)?;
+        let view = self.index.view();
+        let structural_count = view.structural_count();
         Ok(Stage1Stats {
             input_bytes: input.len(),
+            mode: self.mode,
             structural_count,
-            logical_tape_bytes: structural_count * size_of::<u32>(),
-            tape_capacity_bytes: self.tape.capacity() * size_of::<u32>(),
+            index_bytes: view.bytes(),
+            index_capacity_bytes: self.index.capacity_bytes(),
             blocks: metrics.blocks,
             density: if input.is_empty() {
                 0.0
@@ -187,43 +158,34 @@ impl<G: Grammar> Parser<G> {
         })
     }
 
+    /// The index built by the most recent [`Self::stage1`].
     #[inline]
-    pub fn structural_offsets(&self) -> &[u32] {
-        &self.tape
+    pub fn index(&self) -> IndexView<'_> {
+        self.index.view()
     }
 
     #[inline]
-    pub fn tape_capacity_bytes(&self) -> usize {
-        self.tape.capacity() * size_of::<u32>()
+    pub fn index_capacity_bytes(&self) -> usize {
+        self.index.capacity_bytes()
     }
 
     pub fn parse_with<'a>(
         &mut self,
         input: &'a [u8],
-        mut sink: impl FnMut(G::Event<'a>),
+        sink: impl FnMut(G::Event<'a>),
     ) -> Result<ParseStats, G::Error>
     where
         G: 'a,
     {
         let stage1 = self.stage1(input)?;
-        let mut events = 0usize;
-        G::parse(
-            input,
-            &self.tape,
-            &self.config,
-            &mut self.stage2_state,
-            |event| {
-                events += 1;
-                sink(event);
-            },
-        )?;
+        let events = self.stage2_with(input, sink)?;
         Ok(ParseStats { stage1, events })
     }
 
-    /// Run stage 2 over the tape produced by the most recent [`Self::stage1`].
+    /// Run stage 2 over the index produced by the most recent [`Self::stage1`].
     ///
     /// This is primarily useful for isolating stage-2 cost in benchmarks. The
-    /// caller must pass the same input bytes used to build the current tape.
+    /// caller must pass the same input bytes used to build the current index.
     pub fn stage2_with<'a>(
         &mut self,
         input: &'a [u8],
@@ -235,7 +197,7 @@ impl<G: Grammar> Parser<G> {
         let mut events = 0usize;
         G::parse(
             input,
-            &self.tape,
+            self.index.view(),
             &self.config,
             &mut self.stage2_state,
             |event| {
@@ -247,41 +209,6 @@ impl<G: Grammar> Parser<G> {
     }
 }
 
-fn best_backend() -> BackendKind {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if std::is_x86_feature_detected!("avx2") {
-            return BackendKind::Avx2;
-        }
-        if std::is_x86_feature_detected!("ssse3") {
-            return BackendKind::Ssse3;
-        }
-    }
-
-    BackendKind::Scalar
-}
-
-fn stage1_function<G: Grammar>(backend: BackendKind) -> Result<Stage1Fn<G>, BackendError> {
-    match backend {
-        BackendKind::Auto => stage1_function::<G>(best_backend()),
-        BackendKind::Scalar => Ok(backend::scalar::<G>),
-        BackendKind::Ssse3 => {
-            #[cfg(target_arch = "x86_64")]
-            if std::is_x86_feature_detected!("ssse3") {
-                return Ok(backend::ssse3::<G>);
-            }
-            Err(BackendError { requested: backend })
-        }
-        BackendKind::Avx2 => {
-            #[cfg(target_arch = "x86_64")]
-            if std::is_x86_feature_detected!("avx2") {
-                return Ok(backend::avx2::<G>);
-            }
-            Err(BackendError { requested: backend })
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,17 +217,14 @@ mod tests {
     };
 
     fn available_backends() -> Vec<BackendKind> {
-        let mut backends = vec![BackendKind::Scalar];
-        #[cfg(target_arch = "x86_64")]
-        {
-            if std::is_x86_feature_detected!("ssse3") {
-                backends.push(BackendKind::Ssse3);
-            }
-            if std::is_x86_feature_detected!("avx2") {
-                backends.push(BackendKind::Avx2);
-            }
-        }
-        backends
+        [BackendKind::Scalar, BackendKind::Ssse3, BackendKind::Avx2]
+            .into_iter()
+            .filter(|&backend| simdlex_index::resolve_backend(backend).is_ok())
+            .collect()
+    }
+
+    fn positions<G: Grammar>(parser: &Parser<G>) -> Vec<u32> {
+        parser.index().positions().collect()
     }
 
     #[test]
@@ -320,7 +244,7 @@ mod tests {
             let mut expected_events = Vec::new();
             let expected_result =
                 expected_parser.parse_with(document, |event| expected_events.push(event));
-            let expected_offsets = expected_parser.structural_offsets().to_vec();
+            let expected_offsets = positions(&expected_parser);
             let expected_error: Option<JsonError> = expected_result.err();
 
             for backend in available_backends() {
@@ -328,7 +252,7 @@ mod tests {
                     Parser::<JsonGrammar>::with_backend(JsonConfig::default(), backend).unwrap();
                 let mut events: Vec<JsonEvent<'_>> = Vec::new();
                 let result = parser.parse_with(document, |event| events.push(event));
-                assert_eq!(parser.structural_offsets(), expected_offsets);
+                assert_eq!(positions(&parser), expected_offsets);
                 assert_eq!(result.err(), expected_error);
                 assert_eq!(events, expected_events);
             }
@@ -353,30 +277,50 @@ mod tests {
                 scalar
                     .parse_with(document, |event| expected.push(event))
                     .unwrap();
-                let offsets = scalar.structural_offsets().to_vec();
+                let offsets = positions(&scalar);
 
                 for backend in available_backends() {
-                    let mut parser =
-                        Parser::<HtmlGrammar>::with_backend(HtmlConfig::default(), backend)
+                    for mode in [IndexMode::Tape, IndexMode::Masks] {
+                        let mut parser =
+                            Parser::<HtmlGrammar>::with_backend(HtmlConfig::default(), backend)
+                                .unwrap()
+                                .with_index_mode(mode)
+                                .unwrap();
+                        let mut events: Vec<HtmlEvent<'_>> = Vec::new();
+                        parser
+                            .parse_with(document, |event| events.push(event))
                             .unwrap();
-                    let mut events: Vec<HtmlEvent<'_>> = Vec::new();
-                    parser
-                        .parse_with(document, |event| events.push(event))
-                        .unwrap();
-                    assert_eq!(parser.structural_offsets(), offsets);
-                    assert_eq!(events, expected);
+                        assert_eq!(parser.index().mode(), mode);
+                        assert_eq!(positions(&parser), offsets);
+                        assert_eq!(events, expected);
+                    }
                 }
             }
         }
     }
 
     #[test]
+    fn bounded_mask_mode_reuses_capacity() {
+        let html = br#"<a class="x">"#.repeat(16);
+        let mut parser = Parser::<HtmlGrammar>::with_capacity(HtmlConfig::default(), 256)
+            .unwrap()
+            .with_index_mode(IndexMode::Masks)
+            .unwrap();
+        let capacity = parser.index_capacity_bytes();
+        let stats = parser.stage1(&html).unwrap();
+        assert_eq!(stats.mode, IndexMode::Masks);
+        assert_eq!(parser.index_capacity_bytes(), capacity);
+        // Four 64-byte blocks: one structural mask plus five class masks each.
+        assert_eq!(stats.index_bytes, 4 * 6 * size_of::<u64>());
+    }
+
+    #[test]
     fn bounded_parser_rejects_oversize_and_reuses_capacity() {
         let mut parser = Parser::<JsonGrammar>::with_capacity(JsonConfig::default(), 128).unwrap();
         parser.parse_with(b"[1,2,3]", |_| {}).unwrap();
-        let capacity = parser.tape.capacity();
+        let capacity = parser.index_capacity_bytes();
         parser.parse_with(br#"{"a":true}"#, |_| {}).unwrap();
-        assert_eq!(parser.tape.capacity(), capacity);
+        assert_eq!(parser.index_capacity_bytes(), capacity);
         assert_eq!(
             parser.stage1(&[b' '; 129]).unwrap_err().kind,
             crate::JsonErrorKind::Capacity

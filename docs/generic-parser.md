@@ -2,8 +2,9 @@
 
 `simdlex` exposes a reusable `Parser<G: Grammar>`. A grammar owns its nibble
 tables, lexical state, configuration, errors, events, and stage-2 state.
-Scalar, SSSE3, and AVX2 backends only perform grammar-neutral lookup, exact
-comparison, mask assembly, and offset flattening.
+Scalar, SSSE3, and AVX2 backends (in `simdlex-index`) only perform
+grammar-neutral lookup, exact comparison, mask assembly, and tape or mask
+recording.
 
 ```rust
 use simdlex::{HtmlConfig, HtmlEvent, HtmlGrammar, Parser};
@@ -19,7 +20,7 @@ parser.parse_with(source, |event| {
 ```
 
 All source offsets and spans are `u32`; inputs must be shorter than
-`u32::MAX`. `with_capacity` reserves a worst-case structural tape and the
+`u32::MAX`. `with_capacity` reserves a worst-case structural index and the
 grammar's state stack. Calls within that bound allocate nothing after
 construction. `new` grows for a larger first input and retains its buffers.
 CPU detection happens once at construction, while `with_backend` supports
@@ -32,18 +33,16 @@ Stage 2 validates the full JSON grammar and emits borrowed raw strings and
 tokens without a DOM. `decode_json_string` performs optional decoding into
 caller-owned reusable scratch storage.
 
-## Table generation contract
+## Table generation and indexing
 
-A future generator accepts named byte sets and mutually exclusive bit
-domains, and emits `NibbleTables` plus named masks. Generated tables must be
-exhaustively checked for all 256 byte values: every class member must match,
-and no false positive is permitted. Generation fails with a compile-time
-diagnostic when the requested domains cannot fit in eight bits. The generated
-constants have exactly the same shape as today's hand-written constants.
+Stage 1 lives in two workspace crates: `simdlex-tablegen` generates nibble
+tables from named byte sets at compile time, and `simdlex-index` executes
+them and records either an offset tape or per-block masks. See
+[`stage1-index.md`](stage1-index.md).
 
 ## Verification and benchmarks
 
-- `cargo test --all-features` runs grammar correctness, exhaustive table,
+- `cargo test --workspace --all-features` runs grammar correctness, exhaustive table,
   backend equivalence, alignment/tail, differential JSON, and allocation tests.
 - `cargo fuzz run json_stage1_backends`, `json_differential`, and
   `html_backends` exercise the corresponding long-running fuzz properties.

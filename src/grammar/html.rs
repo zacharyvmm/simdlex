@@ -1,12 +1,28 @@
 use std::fmt;
 
-use crate::grammar::{Grammar, NibbleTables, Utf8Policy, span};
-use crate::{CapacityError, ClassifiedBlock, Span};
+use simdlex_index::{ClassifiedBlock, IndexMode, IndexSpec, IndexView, NibbleTables, Utf8Policy};
+use simdlex_tablegen::{ByteSet, Tables, generate, unwrap};
 
-const PUNCTUATION_BITS: u8 = 1;
-const QUOTE_BITS: u8 = 2;
-const WHITESPACE_BITS: u8 = 4 | 8;
-const SLASH_BITS: u8 = 16;
+use crate::grammar::{Grammar, span};
+use crate::{CapacityError, Span};
+
+/// Stage-1 classes, in mask order: `<`, `>`, `=`, `'`, `"`.
+///
+/// These are the only bytes a tag-level HTML state machine needs to jump
+/// between: tag open/close, the attribute operator, and both quote styles.
+/// Whitespace and names are recovered from the bytes between structurals.
+/// Quote regions cannot be masked out in stage 1 the way simdjson masks
+/// strings, because a quote only opens a value inside a tag; apostrophes in
+/// text content would desynchronise a prefix-XOR quote parity.
+const CLASSES: [ByteSet; 5] = [
+    ByteSet::from_bytes(b"<"),
+    ByteSet::from_bytes(b">"),
+    ByteSet::from_bytes(b"="),
+    ByteSet::from_bytes(b"'"),
+    ByteSet::from_bytes(b"\""),
+];
+
+const GENERATED: Tables<5> = unwrap(generate(&CLASSES));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HtmlEmit {
@@ -119,56 +135,55 @@ pub struct HtmlStage2State;
 #[derive(Debug, Clone, Copy)]
 pub struct HtmlGrammar;
 
-impl Grammar for HtmlGrammar {
-    type Config = HtmlConfig;
+impl IndexSpec for HtmlGrammar {
+    type State = HtmlStage1State;
     type Error = HtmlError;
-    type Event<'a> = HtmlEvent<'a>;
-    type Stage1State = HtmlStage1State;
-    type Stage2State = HtmlStage2State;
 
-    // Bits are separated by high-nibble domains. The low/high intersection is
-    // exact for HTML whitespace, quotes, '/', and the '<', '=', '>' group.
     const TABLES: NibbleTables = NibbleTables {
-        low: [8, 0, 2, 0, 0, 0, 0, 2, 0, 4, 4, 0, 1, 1 | 4, 1, 16],
-        high: [4, 0, 2 | 8 | 16, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        low: GENERATED.low,
+        high: GENERATED.high,
     };
-    const UTF8_POLICY: Utf8Policy = Utf8Policy::ByteOriented;
-    const CLASS_BITS: [u8; 8] = [
-        PUNCTUATION_BITS,
-        QUOTE_BITS,
-        WHITESPACE_BITS,
-        SLASH_BITS,
-        0,
-        0,
-        0,
-        0,
-    ];
-    const CLASS_COUNT: usize = 4;
-    const EXACT_BYTES: [u8; 4] = [b'<', b'>', b'=', b'"'];
+    const CLASS_BITS: [u8; 8] = GENERATED.padded_class_bits();
+    const CLASS_COUNT: usize = CLASSES.len();
+    const EXACT_BYTES: [u8; 4] = [0; 4];
     const EXACT_COUNT: usize = 0;
+    const UTF8_POLICY: Utf8Policy = Utf8Policy::ByteOriented;
+    // Five single-byte delimiters are sparse in markup, so a tape is smaller
+    // than per-block masks and lets stage 2 jump directly between them.
+    const MODE: IndexMode = IndexMode::Tape;
 
     #[inline]
     fn scan_block(
         _input: &[u8; 64],
-        base: u32,
-        valid: u64,
-        masks: &ClassifiedBlock,
-        _state: &mut Self::Stage1State,
-        tape: &mut Vec<u32>,
-    ) -> Result<(), Self::Error> {
-        let mask = (masks.class[0] | masks.class[1] | masks.class[2] | masks.class[3]) & valid;
-        flatten_offsets(mask, base, tape);
-        Ok(())
+        _base: u32,
+        _valid: u64,
+        masks: &mut ClassifiedBlock,
+        _state: &mut Self::State,
+    ) -> Result<u64, Self::Error> {
+        Ok(masks.union_of_classes(Self::CLASS_COUNT))
     }
 
     #[inline]
-    fn finish_stage1(_input_len: u32, _state: &mut Self::Stage1State) -> Result<(), Self::Error> {
+    fn finish(_input_len: u32, _state: &mut Self::State) -> Result<(), Self::Error> {
         Ok(())
     }
 
+    fn utf8_error(offset: u32) -> Self::Error {
+        HtmlError {
+            kind: HtmlErrorKind::Capacity,
+            offset,
+        }
+    }
+}
+
+impl Grammar for HtmlGrammar {
+    type Config = HtmlConfig;
+    type Event<'a> = HtmlEvent<'a>;
+    type Stage2State = HtmlStage2State;
+
     fn parse<'a, F>(
         input: &'a [u8],
-        tape: &[u32],
+        index: IndexView<'_>,
         config: &Self::Config,
         _state: &mut Self::Stage2State,
         mut sink: F,
@@ -176,31 +191,14 @@ impl Grammar for HtmlGrammar {
     where
         F: FnMut(Self::Event<'a>),
     {
-        let mut tape_index = 0usize;
-
-        while let Some((index, tag_start)) = find_byte(input, tape, tape_index, b'<') {
-            tape_index = index + 1;
-            let content_start = tag_start + 1;
-
-            if input
-                .get(content_start..content_start.saturating_add(3))
-                .is_some_and(|prefix| prefix == b"!--")
-            {
-                tape_index = find_comment_end(input, tape, tape_index).unwrap_or(tape.len());
-                continue;
+        // Monomorphize the walk per representation rather than dispatching
+        // on the mode for every structural.
+        match index {
+            IndexView::Tape(tape) => parse_tags(input, tape.iter().copied(), config, &mut sink),
+            IndexView::Masks(masks) => {
+                parse_tags(input, masks.structural_positions(), config, &mut sink)
             }
-
-            if matches!(input.get(content_start), Some(b'!' | b'/' | b'?')) {
-                tape_index = find_byte(input, tape, tape_index, b'>')
-                    .map_or(tape.len(), |(index, _)| index + 1);
-                continue;
-            }
-
-            let (tag_end, next_tape_index) = find_tag_end(input, tape, tape_index);
-            parse_tag(input, content_start, tag_end, config, &mut sink);
-            tape_index = next_tape_index;
         }
-
         Ok(())
     }
 
@@ -218,13 +216,6 @@ impl Grammar for HtmlGrammar {
         }
     }
 
-    fn utf8_error(offset: u32) -> Self::Error {
-        HtmlError {
-            kind: HtmlErrorKind::Capacity,
-            offset,
-        }
-    }
-
     fn reserve_stage2(
         _config: &Self::Config,
         _state: &mut Self::Stage2State,
@@ -234,61 +225,66 @@ impl Grammar for HtmlGrammar {
     }
 }
 
+fn parse_tags<'a, F>(
+    input: &'a [u8],
+    mut positions: impl Iterator<Item = u32>,
+    config: &HtmlConfig,
+    sink: &mut F,
+) where
+    F: FnMut(HtmlEvent<'a>),
+{
+    while let Some(tag_start) = find_byte(input, &mut positions, b'<') {
+        let content_start = tag_start + 1;
+
+        if input
+            .get(content_start..content_start.saturating_add(3))
+            .is_some_and(|prefix| prefix == b"!--")
+        {
+            skip_comment(input, &mut positions);
+            continue;
+        }
+
+        if matches!(input.get(content_start), Some(b'!' | b'/' | b'?')) {
+            find_byte(input, &mut positions, b'>');
+            continue;
+        }
+
+        let tag_end = find_tag_end(input, &mut positions);
+        parse_tag(input, content_start, tag_end, config, sink);
+    }
+}
+
 #[inline]
-fn flatten_offsets(mut mask: u64, base: u32, tape: &mut Vec<u32>) {
-    let additional = mask.count_ones() as usize;
-    debug_assert!(tape.capacity() - tape.len() >= additional);
-    let initial_len = tape.len();
-    let mut written = 0usize;
-    let output = unsafe { tape.as_mut_ptr().add(initial_len) };
-
-    while mask != 0 {
-        let lane = mask.trailing_zeros();
-        unsafe { output.add(written).write(base + lane) };
-        written += 1;
-        mask &= mask - 1;
-    }
-    unsafe { tape.set_len(initial_len + written) };
+fn find_byte(input: &[u8], positions: &mut impl Iterator<Item = u32>, wanted: u8) -> Option<usize> {
+    positions
+        .map(|offset| offset as usize)
+        .find(|&offset| input[offset] == wanted)
 }
 
-fn find_byte(input: &[u8], tape: &[u32], mut index: usize, wanted: u8) -> Option<(usize, usize)> {
-    while index < tape.len() {
-        let offset = tape[index] as usize;
-        if input[offset] == wanted {
-            return Some((index, offset));
-        }
-        index += 1;
-    }
-    None
-}
-
-fn find_comment_end(input: &[u8], tape: &[u32], mut index: usize) -> Option<usize> {
-    while let Some((found, offset)) = find_byte(input, tape, index, b'>') {
+fn skip_comment(input: &[u8], positions: &mut impl Iterator<Item = u32>) {
+    while let Some(offset) = find_byte(input, positions, b'>') {
         if offset >= 2 && &input[offset - 2..offset] == b"--" {
-            return Some(found + 1);
+            return;
         }
-        index = found + 1;
     }
-    None
 }
 
-fn find_tag_end(input: &[u8], tape: &[u32], mut index: usize) -> (usize, usize) {
+fn find_tag_end(input: &[u8], positions: &mut impl Iterator<Item = u32>) -> usize {
     let mut quote = 0u8;
-    while index < tape.len() {
-        let offset = tape[index] as usize;
+    for offset in positions {
+        let offset = offset as usize;
         let byte = input[offset];
         if quote == 0 {
             match byte {
                 b'\'' | b'"' => quote = byte,
-                b'>' => return (offset, index + 1),
+                b'>' => return offset,
                 _ => {}
             }
         } else if byte == quote {
             quote = 0;
         }
-        index += 1;
     }
-    (input.len(), tape.len())
+    input.len()
 }
 
 fn parse_tag<'a, F>(
@@ -421,16 +417,24 @@ mod tests {
 
     #[test]
     fn table_is_exact_for_named_sets() {
+        let delimiters = b"<>='\"";
         for byte in u8::MIN..=u8::MAX {
             let class = HtmlGrammar::TABLES.classify(byte);
-            assert_eq!(
-                class & PUNCTUATION_BITS != 0,
-                matches!(byte, b'<' | b'=' | b'>')
-            );
-            assert_eq!(class & QUOTE_BITS != 0, matches!(byte, b'\'' | b'"'));
-            assert_eq!(class & WHITESPACE_BITS != 0, is_html_ws(byte));
-            assert_eq!(class & SLASH_BITS != 0, byte == b'/');
+            for (selected, &delimiter) in delimiters.iter().enumerate() {
+                let bits = HtmlGrammar::CLASS_BITS[selected];
+                assert_eq!(class & bits != 0, byte == delimiter);
+            }
         }
+    }
+
+    #[test]
+    fn tape_holds_only_tag_delimiters() {
+        let input = b"<p a = 'x' b=\"y\"> it's / done</p>";
+        let mut parser = Parser::<HtmlGrammar>::new(HtmlConfig::default());
+        parser.stage1(input).unwrap();
+        let tape = parser.index().tape().unwrap();
+        let bytes: Vec<u8> = tape.iter().map(|&offset| input[offset as usize]).collect();
+        assert_eq!(bytes, b"<=''=\"\">'<>");
     }
 
     #[test]

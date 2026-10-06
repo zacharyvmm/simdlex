@@ -32,7 +32,7 @@ fn main() {
             );
         }
         let stage1_elapsed = stage1_start.elapsed();
-        let structural_count = parser.structural_offsets().len();
+        let structural_count = parser.index().structural_count();
 
         let traversal_start = Instant::now();
         let mut checksum = 0u64;
@@ -54,8 +54,8 @@ fn main() {
             bytes / stage1_elapsed.as_secs_f64() / 1e9,
             bytes / traversal_elapsed.as_secs_f64() / 1e9,
             structural_count as f64 / input.len() as f64,
-            std::mem::size_of_val(parser.structural_offsets()),
-            parser.tape_capacity_bytes(),
+            parser.index().bytes(),
+            parser.index_capacity_bytes(),
         );
     }
 }

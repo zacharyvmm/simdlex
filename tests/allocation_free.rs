@@ -3,7 +3,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use simdlex::{HtmlConfig, HtmlEmit, HtmlGrammar, JsonConfig, JsonGrammar, Parser};
+use simdlex::{HtmlConfig, HtmlEmit, HtmlGrammar, IndexMode, JsonConfig, JsonGrammar, Parser};
 
 struct CountingAllocator;
 
@@ -41,14 +41,20 @@ fn bounded_warm_parsers_allocate_nothing() {
     let mut html_parser =
         Parser::<HtmlGrammar>::with_capacity(HtmlConfig::default().emit(HtmlEmit::Tokens), 256)
             .unwrap();
+    let mut html_mask_parser = Parser::<HtmlGrammar>::with_capacity(HtmlConfig::default(), 256)
+        .unwrap()
+        .with_index_mode(IndexMode::Masks)
+        .unwrap();
 
     json_parser.parse_with(json, |_| {}).unwrap();
     html_parser.parse_with(html, |_| {}).unwrap();
+    html_mask_parser.parse_with(html, |_| {}).unwrap();
 
     ALLOCATIONS.store(0, Ordering::Relaxed);
     ENABLED.store(true, Ordering::SeqCst);
     json_parser.parse_with(json, |_| {}).unwrap();
     html_parser.parse_with(html, |_| {}).unwrap();
+    html_mask_parser.parse_with(html, |_| {}).unwrap();
     ENABLED.store(false, Ordering::SeqCst);
 
     assert_eq!(ALLOCATIONS.load(Ordering::Relaxed), 0);

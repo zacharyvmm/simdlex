@@ -417,7 +417,20 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "serde_json",
+ "simdlex-index",
+ "simdlex-tablegen",
 ]
+
+[[package]]
+name = "simdlex-index"
+version = "0.1.0"
+dependencies = [
+ "simdlex-tablegen",
+]
+
+[[package]]
+name = "simdlex-tablegen"
+version = "0.1.0"
 
 [[package]]
 name = "syn"

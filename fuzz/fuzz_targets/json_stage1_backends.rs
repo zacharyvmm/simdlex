@@ -8,7 +8,7 @@ fuzz_target!(|input: &[u8]| {
         Parser::<JsonGrammar>::with_backend(JsonConfig::default(), BackendKind::Scalar)
             .unwrap();
     let scalar_result = scalar.stage1(input);
-    let scalar_offsets = scalar.structural_offsets().to_vec();
+    let scalar_offsets = scalar.index().positions().collect::<Vec<_>>();
 
     for backend in [BackendKind::Ssse3, BackendKind::Avx2] {
         let Ok(mut parser) =
@@ -17,6 +17,6 @@ fuzz_target!(|input: &[u8]| {
             continue;
         };
         assert_eq!(parser.stage1(input), scalar_result);
-        assert_eq!(parser.structural_offsets(), scalar_offsets);
+        assert_eq!(parser.index().positions().collect::<Vec<_>>(), scalar_offsets);
     }
 });

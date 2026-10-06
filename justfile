@@ -7,7 +7,7 @@ format:
     cargo fmt --all
 
 lint:
-    cargo clippy --all-targets --all-features -- -D warnings
+    cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 build:
     cargo build --release
