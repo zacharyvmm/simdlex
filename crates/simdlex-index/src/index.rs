@@ -6,10 +6,14 @@ use crate::IndexMode;
 /// without per-offset bounds checks.
 pub const SAFETY_PADDING: usize = 8;
 
-/// The layout of one block in [`IndexMode::Masks`]: the structural mask,
-/// followed by `classes` class masks and `exacts` exact-byte masks.
+/// The layout of one block of masks: the structural mask (in
+/// [`IndexMode::Masks`] only), followed by `classes` class masks and
+/// `exacts` exact-byte masks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct MaskLayout {
+    /// Whether the structural mask is stored. In [`IndexMode::Hybrid`] the
+    /// structural lanes go to the tape instead.
+    pub structural: bool,
     pub classes: usize,
     pub exacts: usize,
 }
@@ -17,7 +21,13 @@ pub struct MaskLayout {
 impl MaskLayout {
     #[inline]
     pub const fn stride(self) -> usize {
-        1 + self.classes + self.exacts
+        self.structural as usize + self.classes + self.exacts
+    }
+
+    /// Slot of class 0 within a block.
+    #[inline]
+    const fn first_class(self) -> usize {
+        self.structural as usize
     }
 }
 
@@ -44,18 +54,17 @@ impl StructuralIndex {
         layout: MaskLayout,
         max_input: usize,
     ) -> Result<(), TryReserveError> {
-        match mode {
-            IndexMode::Tape => {
-                let needed = max_input.saturating_add(SAFETY_PADDING);
-                self.tape.clear();
-                self.tape.try_reserve_exact(needed)
-            }
-            IndexMode::Masks => {
-                let needed = max_input.div_ceil(64).saturating_mul(layout.stride());
-                self.masks.clear();
-                self.masks.try_reserve_exact(needed)
-            }
+        if mode != IndexMode::Masks {
+            let needed = max_input.saturating_add(SAFETY_PADDING);
+            self.tape.clear();
+            self.tape.try_reserve_exact(needed)?;
         }
+        if mode != IndexMode::Tape {
+            let needed = max_input.div_ceil(64).saturating_mul(layout.stride());
+            self.masks.clear();
+            self.masks.try_reserve_exact(needed)?;
+        }
+        Ok(())
     }
 
     /// Clear for a new scan and grow if `input_len` exceeds the reservation.
@@ -65,9 +74,11 @@ impl StructuralIndex {
         self.input_len = input_len as u32;
         self.tape.clear();
         self.masks.clear();
-        match mode {
-            IndexMode::Tape => self.tape.reserve(input_len + SAFETY_PADDING),
-            IndexMode::Masks => self.masks.reserve(input_len.div_ceil(64) * layout.stride()),
+        if mode != IndexMode::Masks {
+            self.tape.reserve(input_len + SAFETY_PADDING);
+        }
+        if mode != IndexMode::Tape {
+            self.masks.reserve(input_len.div_ceil(64) * layout.stride());
         }
     }
 
@@ -92,7 +103,9 @@ impl StructuralIndex {
 
     #[inline]
     pub(crate) fn push_block(&mut self, structural: u64, masks: &crate::ClassifiedBlock) {
-        self.masks.push(structural);
+        if self.layout.structural {
+            self.masks.push(structural);
+        }
         self.masks
             .extend_from_slice(&masks.class[..self.layout.classes]);
         self.masks
@@ -106,13 +119,18 @@ impl StructuralIndex {
 
     #[inline]
     pub fn view(&self) -> IndexView<'_> {
+        let masks = MaskView {
+            masks: &self.masks,
+            layout: self.layout,
+            input_len: self.input_len,
+        };
         match self.mode {
             IndexMode::Tape => IndexView::Tape(&self.tape),
-            IndexMode::Masks => IndexView::Masks(MaskView {
-                masks: &self.masks,
-                layout: self.layout,
-                input_len: self.input_len,
-            }),
+            IndexMode::Masks => IndexView::Masks(masks),
+            IndexMode::Hybrid => IndexView::Hybrid {
+                tape: &self.tape,
+                masks,
+            },
         }
     }
 
@@ -129,6 +147,11 @@ pub enum IndexView<'a> {
     Tape(&'a [u32]),
     /// One group of masks per 64-byte block.
     Masks(MaskView<'a>),
+    /// Structural offsets on a tape, plus selected class masks per block.
+    Hybrid {
+        tape: &'a [u32],
+        masks: MaskView<'a>,
+    },
 }
 
 impl<'a> IndexView<'a> {
@@ -137,13 +160,14 @@ impl<'a> IndexView<'a> {
         match self {
             Self::Tape(_) => IndexMode::Tape,
             Self::Masks(_) => IndexMode::Masks,
+            Self::Hybrid { .. } => IndexMode::Hybrid,
         }
     }
 
     #[inline]
     pub fn tape(self) -> Option<&'a [u32]> {
         match self {
-            Self::Tape(tape) => Some(tape),
+            Self::Tape(tape) | Self::Hybrid { tape, .. } => Some(tape),
             Self::Masks(_) => None,
         }
     }
@@ -152,7 +176,7 @@ impl<'a> IndexView<'a> {
     pub fn masks(self) -> Option<MaskView<'a>> {
         match self {
             Self::Tape(_) => None,
-            Self::Masks(masks) => Some(masks),
+            Self::Masks(masks) | Self::Hybrid { masks, .. } => Some(masks),
         }
     }
 
@@ -161,14 +185,14 @@ impl<'a> IndexView<'a> {
     #[inline]
     pub fn positions(self) -> Positions<'a> {
         match self {
-            Self::Tape(tape) => Positions::Tape(tape.iter()),
+            Self::Tape(tape) | Self::Hybrid { tape, .. } => Positions::Tape(tape.iter()),
             Self::Masks(masks) => Positions::Masks(masks.structural_positions()),
         }
     }
 
     pub fn structural_count(self) -> usize {
         match self {
-            Self::Tape(tape) => tape.len(),
+            Self::Tape(tape) | Self::Hybrid { tape, .. } => tape.len(),
             Self::Masks(masks) => (0..masks.blocks())
                 .map(|block| masks.structural(block).count_ones() as usize)
                 .sum(),
@@ -180,11 +204,13 @@ impl<'a> IndexView<'a> {
         match self {
             Self::Tape(tape) => size_of_val(tape),
             Self::Masks(masks) => size_of_val(masks.masks),
+            Self::Hybrid { tape, masks } => size_of_val(tape) + size_of_val(masks.masks),
         }
     }
 }
 
-/// Per-block masks produced in [`IndexMode::Masks`].
+/// Per-block masks produced in [`IndexMode::Masks`] and
+/// [`IndexMode::Hybrid`].
 #[derive(Debug, Clone, Copy)]
 pub struct MaskView<'a> {
     masks: &'a [u64],
@@ -209,8 +235,10 @@ impl<'a> MaskView<'a> {
     }
 
     /// Structural lanes of `block`, as returned by the spec's `scan_block`.
+    /// Only stored in [`IndexMode::Masks`].
     #[inline]
     pub fn structural(self, block: usize) -> u64 {
+        assert!(self.layout.structural);
         self.masks[block * self.layout.stride()]
     }
 
@@ -218,19 +246,21 @@ impl<'a> MaskView<'a> {
     #[inline]
     pub fn class(self, block: usize, class: usize) -> u64 {
         assert!(class < self.layout.classes);
-        self.masks[block * self.layout.stride() + 1 + class]
+        self.masks[block * self.layout.stride() + self.layout.first_class() + class]
     }
 
     /// Refined exact-byte mask `exact` of `block`.
     #[inline]
     pub fn exact(self, block: usize, exact: usize) -> u64 {
         assert!(exact < self.layout.exacts);
-        self.masks[block * self.layout.stride() + 1 + self.layout.classes + exact]
+        self.masks
+            [block * self.layout.stride() + self.layout.first_class() + self.layout.classes + exact]
     }
 
     /// Offsets of structural lanes, across all blocks.
     #[inline]
     pub fn structural_positions(self) -> MaskLanes<'a> {
+        assert!(self.layout.structural);
         self.lanes(0)
     }
 
@@ -238,7 +268,8 @@ impl<'a> MaskView<'a> {
     /// `i`) in `block`.
     #[inline]
     fn union(self, block: usize, classes: u8) -> u64 {
-        let row = &self.masks[block * self.layout.stride() + 1..][..self.layout.classes];
+        let row = &self.masks[block * self.layout.stride() + self.layout.first_class()..]
+            [..self.layout.classes];
         let mut union = 0;
         for (class, mask) in row.iter().enumerate() {
             if classes & (1 << class) != 0 {
@@ -255,12 +286,26 @@ impl<'a> MaskView<'a> {
     /// caller chooses which classes to stop at for each search.
     #[inline]
     pub fn next_in(self, classes: u8, from: usize) -> Option<usize> {
+        self.next_where(from, |block| self.union(block, classes))
+    }
+
+    /// The first structural offset at or after `from`. Only available in
+    /// [`IndexMode::Masks`]; hybrid indexes keep structurals on the tape.
+    #[inline]
+    pub fn next_structural(self, from: usize) -> Option<usize> {
+        assert!(self.layout.structural);
+        let stride = self.layout.stride();
+        self.next_where(from, |block| self.masks[block * stride])
+    }
+
+    #[inline]
+    fn next_where(self, from: usize, mask_of: impl Fn(usize) -> u64) -> Option<usize> {
         let blocks = self.blocks();
         let mut block = from / 64;
         if block >= blocks {
             return None;
         }
-        let mut mask = self.union(block, classes) & (u64::MAX << (from % 64));
+        let mut mask = mask_of(block) & (u64::MAX << (from % 64));
         loop {
             if mask != 0 {
                 return Some(block * 64 + mask.trailing_zeros() as usize);
@@ -269,7 +314,7 @@ impl<'a> MaskView<'a> {
             if block >= blocks {
                 return None;
             }
-            mask = self.union(block, classes);
+            mask = mask_of(block);
         }
     }
 
@@ -284,7 +329,8 @@ impl<'a> MaskView<'a> {
         let mut lane = from % 64;
         let mut run = 0;
         while block < blocks {
-            let mask = self.masks[block * self.layout.stride() + 1 + class] >> lane;
+            let mask = self.masks[block * self.layout.stride() + self.layout.first_class() + class]
+                >> lane;
             let ones = mask.trailing_ones() as usize;
             run += ones;
             if ones < 64 - lane {
@@ -300,7 +346,7 @@ impl<'a> MaskView<'a> {
     #[inline]
     pub fn class_positions(self, class: usize) -> MaskLanes<'a> {
         assert!(class < self.layout.classes);
-        self.lanes(1 + class)
+        self.lanes(self.layout.first_class() + class)
     }
 
     #[inline]

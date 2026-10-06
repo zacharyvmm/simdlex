@@ -3,24 +3,104 @@
 //! Block structure is processed one line at a time. For each line, the
 //! indentation (one `run_length` over the space mask) decides which open
 //! block collections close, whether the line opens a nested node, or whether
-//! it continues the current collection. Within a line, the parser jumps
-//! between `:`, `#`, quote, flow-indicator, and line-feed lanes with
-//! `next_in` instead of visiting every byte. Flow collections use a nested
-//! state machine on the same frame stack.
+//! it continues the current collection. The line feed mask bounds each line,
+//! and the parser reads `:`, `#`, `-`, and flow indicators in place within
+//! those bounds. Quoted scalars, which may span lines, end at the next
+//! matching quote on the tape. Flow collections use a nested state machine
+//! on the same frame stack.
+
+use std::cell::Cell;
 
 use simdlex_index::MaskView;
 
 use super::{
-    COLON, DOUBLE_QUOTE, FLOW, HASH, LINE_FEED, SINGLE_QUOTE, SPACE, YamlBlockScalar, YamlChomping,
-    YamlCollectionStyle, YamlError, YamlErrorKind, YamlEvent, YamlProperties, YamlScalar,
-    YamlScalarStyle, error,
+    LINE_FEED, SPACE, YamlBlockScalar, YamlChomping, YamlCollectionStyle, YamlError, YamlErrorKind,
+    YamlEvent, YamlProperties, YamlScalar, YamlScalarStyle, error,
 };
 use crate::grammar::span;
 
 const LINE_FEED_BIT: u8 = 1 << LINE_FEED;
-const COLON_BIT: u8 = 1 << COLON;
-const HASH_BIT: u8 = 1 << HASH;
-const FLOW_BIT: u8 = 1 << FLOW;
+
+/// Quote offsets: a tape in [`simdlex_index::IndexMode::Hybrid`], the
+/// structural mask in [`simdlex_index::IndexMode::Masks`].
+pub(crate) enum Quotes<'m> {
+    Tape {
+        tape: &'m [u32],
+        /// Tape index of the last match; searches gallop forward from it.
+        hint: Cell<usize>,
+    },
+    Masks(MaskView<'m>),
+}
+
+impl<'m> Quotes<'m> {
+    pub(crate) fn tape(tape: &'m [u32]) -> Self {
+        Self::Tape {
+            tape,
+            hint: Cell::new(0),
+        }
+    }
+
+    /// The first quote in `[from, limit)` whose byte satisfies `wanted`.
+    #[inline]
+    fn find(
+        &self,
+        input: &[u8],
+        from: usize,
+        limit: usize,
+        wanted: impl Fn(u8) -> bool,
+    ) -> Option<usize> {
+        match self {
+            Self::Tape { tape, hint } => {
+                let mut index = seek(tape, hint.get(), from);
+                while let Some(&offset) = tape.get(index) {
+                    let offset = offset as usize;
+                    if offset >= limit {
+                        break;
+                    }
+                    if wanted(input[offset]) {
+                        hint.set(index);
+                        return Some(offset);
+                    }
+                    index += 1;
+                }
+                hint.set(index);
+                None
+            }
+            Self::Masks(masks) => {
+                let mut from = from;
+                while let Some(offset) = masks.next_structural(from) {
+                    if offset >= limit {
+                        return None;
+                    }
+                    if wanted(input[offset]) {
+                        return Some(offset);
+                    }
+                    from = offset + 1;
+                }
+                None
+            }
+        }
+    }
+}
+
+/// Index of the first tape entry at or after `from`. Searches mostly move
+/// forward a little at a time, so gallop from `hint` before falling back to
+/// binary search.
+#[inline]
+fn seek(tape: &[u32], hint: usize, from: usize) -> usize {
+    let before = |index: usize| (tape[index] as usize) < from;
+    if hint > tape.len() || (hint > 0 && !before(hint - 1)) {
+        return tape.partition_point(|&offset| (offset as usize) < from);
+    }
+    let mut index = hint;
+    for _ in 0..8 {
+        if index >= tape.len() || !before(index) {
+            return index;
+        }
+        index += 1;
+    }
+    index + tape[index..].partition_point(|&offset| (offset as usize) < from)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Kind {
@@ -72,6 +152,7 @@ struct Pending<'a> {
 pub(crate) struct Stage2<'a, 'm, 'f, F> {
     input: &'a [u8],
     masks: MaskView<'m>,
+    quotes: Quotes<'m>,
     frames: &'f mut Vec<Frame>,
     max_depth: usize,
     sink: F,
@@ -90,6 +171,7 @@ where
     pub(crate) fn new(
         input: &'a [u8],
         masks: MaskView<'m>,
+        quotes: Quotes<'m>,
         frames: &'f mut Vec<Frame>,
         max_depth: usize,
         sink: F,
@@ -97,6 +179,7 @@ where
         Self {
             input,
             masks,
+            quotes,
             frames,
             max_depth,
             sink,
@@ -367,15 +450,7 @@ where
         if !self.plain_start(at, false) {
             return Ok(None);
         }
-        let mut from = at;
-        loop {
-            let Some(found) = self
-                .masks
-                .next_in(COLON_BIT | HASH_BIT, from)
-                .filter(|&found| found < line_end)
-            else {
-                return Ok(None);
-            };
+        for found in self.colons_and_hashes(at, line_end) {
             if input[found] == b'#' {
                 if is_blank(input[found - 1]) {
                     return Ok(None);
@@ -387,8 +462,8 @@ where
                     found,
                 )));
             }
-            from = found + 1;
         }
+        Ok(None)
     }
 
     /// A plain scalar in block context, possibly continued on more-indented
@@ -434,15 +509,7 @@ where
     fn plain_line(&self, at: usize) -> Result<(usize, bool), YamlError> {
         let input = self.input;
         let line_end = self.line_end(at);
-        let mut from = at;
-        loop {
-            let Some(found) = self
-                .masks
-                .next_in(COLON_BIT | HASH_BIT, from)
-                .filter(|&found| found < line_end)
-            else {
-                return Ok((self.trim_end(at, line_end), false));
-            };
+        for found in self.colons_and_hashes(at, line_end) {
             if input[found] == b'#' {
                 if found > at && is_blank(input[found - 1]) {
                     return Ok((self.trim_end(at, found), true));
@@ -451,8 +518,18 @@ where
                 // `key: a: b` or a continuation line that looks like a key.
                 return Err(error(YamlErrorKind::UnexpectedContent, found));
             }
-            from = found + 1;
         }
+        Ok((self.trim_end(at, line_end), false))
+    }
+
+    /// Offsets of `:` and `#` in `[from, limit)`, found by scanning the
+    /// line.
+    fn colons_and_hashes(&self, from: usize, limit: usize) -> impl Iterator<Item = usize> + '_ {
+        self.input[from..limit]
+            .iter()
+            .enumerate()
+            .filter(|&(_, &byte)| byte == b':' || byte == b'#')
+            .map(move |(offset, _)| from + offset)
     }
 
     /// A `|` or `>` block scalar. Returns the start of the line after it.
@@ -681,23 +758,17 @@ where
     /// The end of a plain scalar in flow context, which may span lines.
     fn plain_flow_end(&self, at: usize) -> usize {
         let input = self.input;
-        let mut from = at;
-        loop {
-            let Some(found) = self
-                .masks
-                .next_in(COLON_BIT | HASH_BIT | FLOW_BIT | LINE_FEED_BIT, from)
-            else {
-                return self.trim_end(at, input.len());
+        for end in at..input.len() {
+            let ends = match input[end] {
+                b':' => self.ends_flow_token(end + 1),
+                b'#' => is_blank_or_break(input[end - 1]),
+                byte => is_flow_indicator(byte),
             };
-            match input[found] {
-                b'\n' => {}
-                b'#' if is_blank_or_break(input[found - 1]) => return self.trim_end(at, found),
-                b'#' => {}
-                b':' if !self.ends_flow_token(found + 1) => {}
-                _ => return self.trim_end(at, found),
+            if ends {
+                return self.trim_end(at, end);
             }
-            from = found + 1;
         }
+        self.trim_end(at, input.len())
     }
 
     fn open_flow(&mut self, at: usize, properties: YamlProperties<'a>) -> Result<(), YamlError> {
@@ -745,7 +816,10 @@ where
         let input = self.input;
         let mut from = open + 1;
         loop {
-            let Some(quote) = self.masks.next_in(1 << DOUBLE_QUOTE, from) else {
+            let Some(quote) = self
+                .quotes
+                .find(input, from, input.len(), |byte| byte == b'"')
+            else {
                 return Err(error(YamlErrorKind::UnterminatedQuote, open));
             };
             let mut start = quote;
@@ -762,7 +836,10 @@ where
     fn single_quote_end(&self, open: usize) -> Result<usize, YamlError> {
         let mut from = open + 1;
         loop {
-            let Some(quote) = self.masks.next_in(1 << SINGLE_QUOTE, from) else {
+            let Some(quote) = self
+                .quotes
+                .find(self.input, from, self.input.len(), |byte| byte == b'\'')
+            else {
                 return Err(error(YamlErrorKind::UnterminatedQuote, open));
             };
             if self.input.get(quote + 1) == Some(&b'\'') {

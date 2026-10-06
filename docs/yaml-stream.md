@@ -1,29 +1,54 @@
-# YAML: mask-mode stage 1 and event stream
+# YAML: hybrid stage 1 and event stream
 
 > Experimental. Events only (libyaml-style): no tree, no schema resolution
 > (`null`, `true`, `1` are plain scalars), no tag-handle resolution.
 
-## Why masks, not a tape
+## Stage 1: what YAML indexes
 
-YAML's structure is carried by indentation, so the bytes stage 2 must see
-(every space and line break, plus `:`, `#`, quotes, and flow indicators) are
-dense. On the benchmark fixture, 35% of bytes are significant:
+Following the rule in [stage1-index.md](stage1-index.md#what-the-index-is-for),
+the index records only the bounds stage 2 must search for:
 
-| stage 1 mode | index size (754 KB input) | throughput (AVX2) |
+| Class | Bound | Stored as |
 |---|---|---|
-| `Masks` (default) | 754 KB (8 masks × 8 B per 64 B) | 2.94 GiB/s |
-| `Tape` | 1.06 MB (4 B per structural) | 2.30 GiB/s |
+| `\n` | end of every line | mask |
+| space | indentation (`MaskView::run_length`) | mask |
+| `'` `"` | end of a quoted scalar, which may span many lines | tape |
 
-Stage 2 needs the masks: it measures indentation with
-`MaskView::run_length(SPACE, line)` and finds the next line feed, `:`,
-`#`, quote, or flow indicator with `MaskView::next_in(classes, from)`, both
-added to `simdlex-index`. Run in tape mode, stage 2 returns
-`YamlErrorKind::RequiresMaskIndex`.
+Everything else is read in place. `:`, `#`, `-` and `[ ] { } ,` all lie
+inside a line that stage 2 is already walking between known bounds. Line
+feeds and spaces are dense (spaces alone are 19–40% of the bytes in the
+files below), so they are masks. Quotes are 0.1–0.6% of the bytes, so they
+go on a tape. That makes YAML the first `IndexMode::Hybrid` grammar. It
+uses three generated table bits.
 
-Classes (8 table bits, generated): line feed, space, `:`, `#`, `"`, `'`,
-and `[]{},`. Quote and comment context are not resolved in stage 1: an
-apostrophe inside a plain scalar (`don't`) is text, so prefix-XOR parity
-would be wrong.
+In mask mode the quotes come from the structural mask instead of a tape, and
+stage 2 still works. A tape alone has no indentation, so tape mode returns
+`YamlErrorKind::RequiresMaskIndex`. Quote context is not resolved in
+stage 1: an apostrophe in a plain scalar (`don't`) is text, so prefix-XOR
+parity would be wrong.
+
+Index size for the 754 KB benchmark fixture:
+
+| Mode | Index |
+|---|---|
+| `Hybrid` (default) | 254 KB: 2 masks × 8 B per 64 B, plus 4 B per quote |
+| `Masks` | 377 KB: structural + 3 class masks per block |
+| all 7 classes as masks (earlier design) | 754 KB |
+| layout bytes on a tape | 1.06 MB: 35% of the bytes would be tape entries |
+
+### How this design was chosen
+
+All variants were benchmarked interleaved on a synthetic fixture and four
+real files (GitHub's 9.9 MB OpenAPI description, a Prometheus Helm values
+file, the rust-lang CI workflow, an ingress-nginx manifest):
+
+| Variant | Stage 1 vs first design | Full parse vs first design |
+|---|---|---|
+| First design: masks `\n` space `:` `#` `"` `'` `[]{},` | – | – |
+| Masks `\n` space `:` `-`; tape `#` quotes `[]{},` | +5 to +40% | −10 to −21% |
+| …without `-` (never read) | +4 to +61% | −5 to −18% |
+| Masks `\n` space `:` `#`; tape quotes `[]{},` | +21 to +41% | +1 to +15% |
+| **Masks `\n` space; tape quotes (chosen)** | **+45 to +64%** | **+7 to +29%** |
 
 ## Events
 
@@ -79,12 +104,18 @@ not validated.
   strings never panic and agree across backends.
 - Fuzz target `yaml_differential` (backends, then yaml-rust2).
 
-## Benchmarks (local, AVX2, 754 KB fixture)
+## Benchmarks (local, AVX2)
 
-| | throughput |
-|---|---|
-| events | 177 MiB/s |
-| events + decode every scalar | 103 MiB/s |
-| yaml-rust2 events | 38 MiB/s |
+Full parse is stage 1 plus stage 2. These numbers come from the interleaved
+comparison above.
 
-Stage 2 dominates; stage 1 runs at 2.9 GiB/s.
+| Input | Full parse | Parse + decode | First design, full parse |
+|---|---|---|---|
+| synthetic, 754 KB | 233 MiB/s | 118 MiB/s | 180 MiB/s |
+| GitHub OpenAPI, 9.9 MB | 360 MiB/s | 178 MiB/s | 297 MiB/s |
+| Prometheus values, 219 KB | 651 MiB/s | 430 MiB/s | 609 MiB/s |
+| rust-lang CI, 14 KB | 570 MiB/s | 275 MiB/s | 514 MiB/s |
+| ingress-nginx, 16 KB | 262 MiB/s | 131 MiB/s | 229 MiB/s |
+
+yaml-rust2 parses the synthetic fixture at 38 MiB/s on the same machine.
+Stage 2 dominates the cost; stage 1 runs at 3.9–5.6 GiB/s.

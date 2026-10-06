@@ -1,12 +1,16 @@
-//! A YAML event stream: a mask-mode stage 1 and a streaming stage 2.
+//! A YAML event stream: a hybrid-index stage 1 and a streaming stage 2.
 //!
-//! YAML's structure is carried by indentation, so the bytes stage 2 must
-//! look at (every space, every line break) are dense. A tape would hold an
-//! entry for most input bytes; instead stage 1 keeps one mask per class per
-//! 64-byte block ([`IndexMode::Masks`]). Stage 2 measures indentation with
-//! [`simdlex_index::MaskView::run_length`] and finds the next line break,
-//! `:`, `#`, quote, or flow indicator with
-//! [`simdlex_index::MaskView::next_in`].
+//! The index only records the bounds stage 2 has to search for. In YAML
+//! those are line feeds and spaces, which bound every line and its
+//! indentation, and quotes, which bound scalars that may span many lines.
+//! Everything else (`:`, `#`, `-`, flow indicators) lies inside a line that
+//! stage 2 is already walking, so it is read in place rather than indexed.
+//!
+//! Line feeds and spaces are dense, so they stay per-block masks; quotes are
+//! sparse, so they go to a tape ([`IndexMode::Hybrid`]). Stage 2 measures
+//! indentation with [`simdlex_index::MaskView::run_length`], finds line ends
+//! with [`simdlex_index::MaskView::next_in`], and jumps along the tape to
+//! closing quotes.
 //!
 //! Stage 2 emits libyaml-style events and builds no tree. Scalars are
 //! borrowed raw spans; [`decode_yaml_scalar`] folds and unescapes them into
@@ -28,26 +32,23 @@ use crate::{CapacityError, Span};
 
 pub use decode::decode_yaml_scalar;
 
-/// Mask indices, in class order.
+/// Class indices. Layout classes come first: they keep their masks in
+/// hybrid mode.
 pub(crate) const LINE_FEED: usize = 0;
 pub(crate) const SPACE: usize = 1;
-pub(crate) const COLON: usize = 2;
-pub(crate) const HASH: usize = 3;
-pub(crate) const DOUBLE_QUOTE: usize = 4;
-pub(crate) const SINGLE_QUOTE: usize = 5;
-pub(crate) const FLOW: usize = 6;
+/// Quotes, recorded on the tape in hybrid mode. A quoted scalar can span
+/// many lines, so stage 2 jumps to its closing quote through the index.
+/// Everything else (`:`, `#`, `-`, flow indicators) is found by scanning
+/// the current line, which the line-feed mask already bounds.
+pub(crate) const QUOTES: usize = 2;
 
-const CLASSES: [ByteSet; 7] = [
+const CLASSES: [ByteSet; 3] = [
     ByteSet::from_bytes(b"\n"),
     ByteSet::from_bytes(b" "),
-    ByteSet::from_bytes(b":"),
-    ByteSet::from_bytes(b"#"),
-    ByteSet::from_bytes(b"\""),
-    ByteSet::from_bytes(b"'"),
-    ByteSet::from_bytes(b"[]{},"),
+    ByteSet::from_bytes(b"'\""),
 ];
 
-const GENERATED: Tables<7> = unwrap(generate(&CLASSES));
+const GENERATED: Tables<3> = unwrap(generate(&CLASSES));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct YamlConfig {
@@ -169,7 +170,8 @@ pub enum YamlErrorKind {
     InputTooLarge,
     Capacity,
     Depth,
-    /// Stage 2 needs [`IndexMode::Masks`]; a tape omits indentation.
+    /// Stage 2 needs layout masks ([`IndexMode::Hybrid`] or
+    /// [`IndexMode::Masks`]); a tape alone omits indentation.
     RequiresMaskIndex,
     /// A tab where indentation is required.
     TabIndentation,
@@ -227,9 +229,10 @@ impl IndexSpec for YamlGrammar {
     const EXACT_BYTES: [u8; 4] = [0; 4];
     const EXACT_COUNT: usize = 0;
     const UTF8_POLICY: Utf8Policy = Utf8Policy::Validate;
-    // Spaces and line breaks drive the state machine, so a tape would list
-    // most bytes. Masks cost a fixed 64 bytes per 64 input bytes.
-    const MODE: IndexMode = IndexMode::Masks;
+    // Spaces and line feeds are dense, so they stay masks; quotes are
+    // sparse, so they are cheaper as a tape.
+    const MODE: IndexMode = IndexMode::Hybrid;
+    const HYBRID_MASK_CLASSES: usize = QUOTES;
 
     #[inline]
     fn scan_block(
@@ -239,10 +242,10 @@ impl IndexSpec for YamlGrammar {
         masks: &mut ClassifiedBlock,
         _state: &mut (),
     ) -> Result<u64, YamlError> {
-        // Every class is significant. Quote and comment context cannot be
-        // resolved here: a `'` inside a plain scalar (`don't`) is ordinary
-        // text, so prefix-XOR parity would be wrong.
-        Ok(masks.union_of_classes(Self::CLASS_COUNT))
+        // Quotes are the structurals. Quote context cannot be resolved here:
+        // a `'` inside a plain scalar (`don't`) is ordinary text, so
+        // prefix-XOR parity would be wrong.
+        Ok(masks.class[QUOTES])
     }
 
     #[inline]
@@ -273,11 +276,21 @@ impl Grammar for YamlGrammar {
     where
         F: FnMut(Self::Event<'a>),
     {
-        let Some(masks) = index.masks() else {
-            return Err(error(YamlErrorKind::RequiresMaskIndex, 0));
+        let (masks, quotes) = match index {
+            IndexView::Hybrid { tape, masks } => (masks, stage2::Quotes::tape(tape)),
+            IndexView::Masks(masks) => (masks, stage2::Quotes::Masks(masks)),
+            IndexView::Tape(_) => return Err(error(YamlErrorKind::RequiresMaskIndex, 0)),
         };
         state.frames.clear();
-        stage2::Stage2::new(input, masks, &mut state.frames, config.max_depth, sink).run()
+        stage2::Stage2::new(
+            input,
+            masks,
+            quotes,
+            &mut state.frames,
+            config.max_depth,
+            sink,
+        )
+        .run()
     }
 
     fn input_too_large_error() -> Self::Error {

@@ -100,7 +100,7 @@ fn yaml(c: &mut Criterion) {
     let mut group = c.benchmark_group("yaml");
     group.throughput(Throughput::Bytes(yaml.len() as u64));
 
-    for mode in [IndexMode::Masks, IndexMode::Tape] {
+    for mode in [IndexMode::Hybrid, IndexMode::Masks, IndexMode::Tape] {
         let mut parser = Parser::<YamlGrammar>::new(YamlConfig::default())
             .with_index_mode(mode)
             .unwrap();

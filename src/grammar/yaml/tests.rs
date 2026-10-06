@@ -862,28 +862,31 @@ fn every_backend_and_alignment_agrees() {
         let input = format!("#{}\n{body}", "p".repeat(prefix));
         let expected = render(&input).unwrap();
         for backend in [BackendKind::Scalar, BackendKind::Ssse3, BackendKind::Avx2] {
-            let Ok(mut parser) =
-                Parser::<YamlGrammar>::with_backend(YamlConfig::default(), backend)
-            else {
-                continue;
-            };
-            let mut events = Vec::new();
-            parser
-                .parse_with(input.as_bytes(), |event| events.push(event))
-                .unwrap();
-            let mut scratch = String::new();
-            let actual: Vec<String> = events
-                .into_iter()
-                .map(|event| render_event(event, &mut scratch).unwrap())
-                .collect();
-            assert_eq!(actual, expected, "prefix {prefix}, {backend:?}");
+            for mode in [IndexMode::Hybrid, IndexMode::Masks] {
+                let Ok(parser) =
+                    Parser::<YamlGrammar>::with_backend(YamlConfig::default(), backend)
+                else {
+                    continue;
+                };
+                let mut parser = parser.with_index_mode(mode).unwrap();
+                let mut events = Vec::new();
+                parser
+                    .parse_with(input.as_bytes(), |event| events.push(event))
+                    .unwrap();
+                let mut scratch = String::new();
+                let actual: Vec<String> = events
+                    .into_iter()
+                    .map(|event| render_event(event, &mut scratch).unwrap())
+                    .collect();
+                assert_eq!(actual, expected, "prefix {prefix}, {backend:?}, {mode:?}");
+            }
         }
     }
 }
 
 #[test]
 fn table_is_exact_for_named_sets() {
-    let members: [&[u8]; 7] = [b"\n", b" ", b":", b"#", b"\"", b"'", b"[]{},"];
+    let members: [&[u8]; 3] = [b"\n", b" ", b"'\""];
     for byte in u8::MIN..=u8::MAX {
         let class = YamlGrammar::TABLES.classify(byte);
         for (index, set) in members.iter().enumerate() {
@@ -904,6 +907,9 @@ fn random_bytes_never_panic_and_backends_agree() {
     let mut scalar =
         Parser::<YamlGrammar>::with_backend(YamlConfig::default(), BackendKind::Scalar).unwrap();
     let mut best = Parser::<YamlGrammar>::new(YamlConfig::default());
+    let mut masks = Parser::<YamlGrammar>::new(YamlConfig::default())
+        .with_index_mode(IndexMode::Masks)
+        .unwrap();
     let mut scratch = String::new();
 
     for _ in 0..5_000 {
@@ -917,6 +923,10 @@ fn random_bytes_never_panic_and_backends_agree() {
         let actual_result = best.parse_with(&input, |event| actual.push(event));
         assert_eq!(actual_result.err(), expected_result.err());
         assert_eq!(actual, expected);
+        let mut from_masks = Vec::new();
+        let masks_result = masks.parse_with(&input, |event| from_masks.push(event));
+        assert_eq!(masks_result.err(), expected_result.err());
+        assert_eq!(from_masks, expected);
         for event in expected {
             if let YamlEvent::Scalar(scalar) = event {
                 let _ = decode_yaml_scalar(&scalar, &mut scratch);

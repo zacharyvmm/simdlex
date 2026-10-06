@@ -60,11 +60,17 @@ pub enum Utf8Policy {
 ///   wins when significant bytes are dense — for example YAML, where
 ///   indentation spaces drive the state machine and a tape would hold an
 ///   entry for most input bytes.
+/// - [`IndexMode::Hybrid`] does both, per class: the structural lanes go to
+///   the tape and the first [`IndexSpec::HYBRID_MASK_CLASSES`] class masks
+///   are kept per block. Dense layout classes (spaces, line feeds) stay
+///   masks, while sparse inline delimiters (quotes, brackets) become a short
+///   tape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum IndexMode {
     #[default]
     Tape,
     Masks,
+    Hybrid,
 }
 
 /// A compile-time description of one lexical scan.
@@ -89,13 +95,18 @@ pub trait IndexSpec: Sized {
     const UTF8_POLICY: Utf8Policy;
     /// The mode a parser uses unless the caller overrides it.
     const MODE: IndexMode;
+    /// How many leading classes keep their masks in [`IndexMode::Hybrid`].
+    /// Order classes so that the dense ones come first.
+    const HYBRID_MASK_CLASSES: usize = Self::CLASS_COUNT;
 
     /// Refine one block. On entry, `masks` holds the classified block with
     /// lanes outside `valid` already cleared. Returns the structural lanes.
     ///
     /// In [`IndexMode::Tape`] the returned lanes are flattened into offsets.
     /// In [`IndexMode::Masks`] they are stored together with the refined
-    /// class and exact masks left in `masks`.
+    /// class and exact masks left in `masks`. In [`IndexMode::Hybrid`] they
+    /// are flattened, and the first [`Self::HYBRID_MASK_CLASSES`] class masks
+    /// are stored.
     fn scan_block(
         input: &[u8; 64],
         base: u32,
