@@ -52,7 +52,7 @@ fn scan_block(input: &[u8; 64], base: u32, valid: u64,
 ```
 
 The backend classifies a block, the hook refines the masks (JSON removes
-in-string bytes and finds scalar starts; HTML just unions its five classes)
+in-string bytes and finds scalar starts; HTML just unions its four classes)
 and returns the structural lanes. The indexer then records the block in one
 of two modes, chosen at compile time inside the block loop:
 
@@ -69,20 +69,25 @@ single class lazily.
 
 ## HTML
 
-HTML stage 1 indexes exactly `<`, `>`, `=`, `'`, and `"`, one class each.
-Whitespace and `/` are no longer structural: the tag walker finds names and
-whitespace by scanning bytes between delimiters. Unlike JSON strings, quotes
-cannot be masked in stage 1, because a quote only opens a value inside a tag,
-and apostrophes in text would break prefix-XOR parity. Quote pairing therefore
-stays in stage 2. The default mode is `Tape`.
+HTML stage 1 indexes exactly `<`, `>`, `'`, and `"`, one class each.
+Whitespace, `/`, and `=` are not structural: the tag walker reads names,
+whitespace, and the `=` that follows an attribute name directly from the
+bytes between delimiters. Indexing `=` was measured and rejected: it was
+13–21% of structurals on real pages, stage 2 only ever skipped those
+entries, and dropping it made stage 1 8–12% faster with identical events.
+
+Unlike JSON strings, quotes cannot be masked in stage 1, because a quote
+only opens a value inside a tag, and apostrophes in text would break
+prefix-XOR parity. Quote pairing therefore stays in stage 2. The default
+mode is `Tape`.
 
 Measured on the `stage1/html` fixture (AVX2, 8 192 repetitions, ~1 MiB):
 
 | | main | this change |
 |---|---|---|
-| stage 1, tape | 4.72 GiB/s | 5.66 GiB/s |
-| stage 1, masks | – | 4.38 GiB/s |
-| `extract_candidates` 8192 | 0.92 GiB/s | 1.05 GiB/s |
+| stage 1, tape | 4.70 GiB/s | 6.16 GiB/s |
+| stage 1, masks | – | 4.75 GiB/s |
+| `extract_candidates` 8192 | 0.90 GiB/s | 1.06 GiB/s |
 
 JSON stage 1 on the same machine went from 1.76 GiB/s to 1.94 GiB/s.
 

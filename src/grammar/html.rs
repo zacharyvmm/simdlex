@@ -6,23 +6,25 @@ use simdlex_tablegen::{ByteSet, Tables, generate, unwrap};
 use crate::grammar::{Grammar, span};
 use crate::{CapacityError, Span};
 
-/// Stage-1 classes, in mask order: `<`, `>`, `=`, `'`, `"`.
+/// Stage-1 classes, in mask order: `<`, `>`, `'`, `"`.
 ///
 /// These are the only bytes a tag-level HTML state machine needs to jump
-/// between: tag open/close, the attribute operator, and both quote styles.
-/// Whitespace and names are recovered from the bytes between structurals.
+/// between: tag open/close and both quote styles. Whitespace, names, and
+/// `=` are read directly from the bytes between structurals. `=` is not
+/// indexed: it always follows an attribute name the walker is already
+/// reading, so a tape entry for it would only be skipped (it was 13–21% of
+/// structurals on real pages, and dropping it sped stage 1 up by 8–12%).
 /// Quote regions cannot be masked out in stage 1 the way simdjson masks
 /// strings, because a quote only opens a value inside a tag; apostrophes in
 /// text content would desynchronise a prefix-XOR quote parity.
-const CLASSES: [ByteSet; 5] = [
+const CLASSES: [ByteSet; 4] = [
     ByteSet::from_bytes(b"<"),
     ByteSet::from_bytes(b">"),
-    ByteSet::from_bytes(b"="),
     ByteSet::from_bytes(b"'"),
     ByteSet::from_bytes(b"\""),
 ];
 
-const GENERATED: Tables<5> = unwrap(generate(&CLASSES));
+const GENERATED: Tables<4> = unwrap(generate(&CLASSES));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HtmlEmit {
@@ -417,7 +419,7 @@ mod tests {
 
     #[test]
     fn table_is_exact_for_named_sets() {
-        let delimiters = b"<>='\"";
+        let delimiters = b"<>'\"";
         for byte in u8::MIN..=u8::MAX {
             let class = HtmlGrammar::TABLES.classify(byte);
             for (selected, &delimiter) in delimiters.iter().enumerate() {
@@ -434,7 +436,7 @@ mod tests {
         parser.stage1(input).unwrap();
         let tape = parser.index().tape().unwrap();
         let bytes: Vec<u8> = tape.iter().map(|&offset| input[offset as usize]).collect();
-        assert_eq!(bytes, b"<=''=\"\">'<>");
+        assert_eq!(bytes, b"<''\"\">'<>");
     }
 
     #[test]

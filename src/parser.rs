@@ -310,8 +310,8 @@ mod tests {
         let stats = parser.stage1(&html).unwrap();
         assert_eq!(stats.mode, IndexMode::Masks);
         assert_eq!(parser.index_capacity_bytes(), capacity);
-        // Four 64-byte blocks: one structural mask plus five class masks each.
-        assert_eq!(stats.index_bytes, 4 * 6 * size_of::<u64>());
+        // Four 64-byte blocks: one structural mask plus four class masks each.
+        assert_eq!(stats.index_bytes, 4 * 5 * size_of::<u64>());
     }
 
     #[test]
