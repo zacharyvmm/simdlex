@@ -1,12 +1,17 @@
 //! Compile-time grammar contracts used by [`crate::Parser`].
 
 mod html;
+mod html_stream;
 
 #[cfg(any(feature = "json-test-grammar", test))]
 mod json;
 
 pub use html::{
     HtmlConfig, HtmlEmit, HtmlError, HtmlErrorKind, HtmlEvent, HtmlGrammar, HtmlStage1State,
+};
+pub use html_stream::{
+    HtmlAttribute, HtmlAttributeValue, HtmlAttributes, HtmlReader, HtmlStartElement,
+    HtmlStreamEvent, HtmlStreamGrammar,
 };
 
 #[cfg(any(feature = "json-test-grammar", test))]

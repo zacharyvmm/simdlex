@@ -1,6 +1,7 @@
 use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
 use simdlex::{
-    HtmlConfig, HtmlEmit, HtmlEvent, HtmlGrammar, JsonConfig, JsonEvent, JsonGrammar, Parser,
+    HtmlConfig, HtmlEmit, HtmlEvent, HtmlGrammar, HtmlStreamEvent, HtmlStreamGrammar, IndexMode,
+    JsonConfig, JsonEvent, JsonGrammar, Parser,
 };
 
 fn grammar_parser(c: &mut Criterion) {
@@ -74,7 +75,41 @@ fn grammar_parser(c: &mut Criterion) {
             black_box(checksum)
         })
     });
+    for mode in [IndexMode::Tape, IndexMode::Masks] {
+        let mut stream_parser = Parser::<HtmlStreamGrammar>::new(())
+            .with_index_mode(mode)
+            .unwrap();
+        group.bench_function(format!("stream/{mode:?}"), |bench| {
+            bench.iter(|| {
+                let mut checksum = 0u64;
+                stream_parser
+                    .parse_with(black_box(&html), |event| {
+                        checksum = checksum.wrapping_add(html_stream_checksum(event));
+                    })
+                    .unwrap();
+                black_box(checksum)
+            })
+        });
+    }
     group.finish();
+}
+
+fn html_stream_checksum(event: HtmlStreamEvent<'_>) -> u64 {
+    match event {
+        HtmlStreamEvent::StartElement(element) => {
+            element
+                .attributes()
+                .fold(bytes_checksum(13, element.name), |checksum, attribute| {
+                    let value = attribute.value.map_or(&[][..], |value| value.raw);
+                    checksum ^ bytes_checksum(bytes_checksum(14, attribute.name), value)
+                })
+        }
+        HtmlStreamEvent::EndElement { name, .. } => bytes_checksum(15, name),
+        HtmlStreamEvent::Text { raw, .. }
+        | HtmlStreamEvent::Comment { raw, .. }
+        | HtmlStreamEvent::Doctype { raw, .. }
+        | HtmlStreamEvent::BogusComment { raw, .. } => bytes_checksum(16, raw),
+    }
 }
 
 fn json_fixture(items: usize) -> Vec<u8> {

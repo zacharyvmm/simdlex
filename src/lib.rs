@@ -13,8 +13,9 @@ pub use extract::{
     extract_candidates, extract_class_tokens, extract_tokens, html::extract_class_spans,
 };
 pub use grammar::{
-    Grammar, HtmlConfig, HtmlEmit, HtmlError, HtmlErrorKind, HtmlEvent, HtmlGrammar,
-    HtmlStage1State,
+    Grammar, HtmlAttribute, HtmlAttributeValue, HtmlAttributes, HtmlConfig, HtmlEmit, HtmlError,
+    HtmlErrorKind, HtmlEvent, HtmlGrammar, HtmlReader, HtmlStage1State, HtmlStartElement,
+    HtmlStreamEvent, HtmlStreamGrammar,
 };
 #[cfg(any(feature = "json-test-grammar", test))]
 pub use grammar::{
