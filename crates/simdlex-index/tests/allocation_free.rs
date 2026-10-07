@@ -2,16 +2,30 @@ use simdlex_index::{IndexSpec, Indexer, NibbleTables, StructuralIndex};
 use simdlex_tablegen::{ByteSet, Tables, generate, unwrap};
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::cell::Cell;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// Counts allocations made by the measuring thread only, so the test
+/// harness's own threads cannot make the test flaky.
 struct CountingAllocator;
 
-static ENABLED: AtomicBool = AtomicBool::new(false);
+thread_local! {
+    static COUNTING: Cell<bool> = const { Cell::new(false) };
+}
+
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+
+fn set_counting(enabled: bool) {
+    COUNTING.with(|counting| counting.set(enabled));
+}
+
+fn counting() -> bool {
+    COUNTING.try_with(Cell::get).unwrap_or(false)
+}
 
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if ENABLED.load(Ordering::Relaxed) {
+        if counting() {
             ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
         }
         unsafe { System.alloc(layout) }
@@ -22,7 +36,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        if ENABLED.load(Ordering::Relaxed) {
+        if counting() {
             ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
         }
         unsafe { System.realloc(pointer, layout, size) }
@@ -59,20 +73,20 @@ fn reserved_windows_allocate_nothing() {
     Indexer::<Spec>::reserve(&mut index, 1_024).unwrap();
 
     // The counter must see a known allocation, or this test proves nothing.
-    ENABLED.store(true, Ordering::SeqCst);
+    set_counting(true);
     std::hint::black_box(Vec::<u8>::with_capacity(8));
-    ENABLED.store(false, Ordering::SeqCst);
+    set_counting(false);
     assert!(ALLOCATIONS.load(Ordering::Relaxed) > 0);
 
     ALLOCATIONS.store(0, Ordering::Relaxed);
-    ENABLED.store(true, Ordering::SeqCst);
+    set_counting(true);
     for start in (0..input.len()).step_by(1_024) {
         let end = (start + 1_024).min(input.len());
         indexer
             .index_window(&input, start..end, &mut (), &mut index)
             .unwrap();
     }
-    ENABLED.store(false, Ordering::SeqCst);
+    set_counting(false);
 
     assert_eq!(ALLOCATIONS.load(Ordering::Relaxed), 0);
 }
