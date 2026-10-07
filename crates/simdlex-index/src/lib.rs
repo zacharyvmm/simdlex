@@ -493,6 +493,8 @@ mod tests {
                 .map(|&o| o as usize)
                 .find(|&o| o >= from && input[o] == b'>');
             assert_eq!(cursor.find(&input, from, |b| b == b'>'), expected);
+            let mut resumed = TapeCursor::at(tape, rng as usize % (tape.len() + 3));
+            assert_eq!(resumed.find(&input, from, |b| b == b'>'), expected);
             if let Some(found) = expected {
                 assert_eq!(cursor.peek(), Some(found));
                 assert_eq!(cursor.find(&input, from, |b| b == b'>'), expected);

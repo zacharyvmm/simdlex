@@ -133,6 +133,15 @@ impl<'a> TapeCursor<'a> {
         Self { tape, next: 0 }
     }
 
+    /// Resume at tape index `index`, as saved from [`Self::index`]. A cursor
+    /// cannot be stored next to the index it borrows, so parsers keep the
+    /// index and rebuild the cursor around each search. Any index is valid:
+    /// [`Self::seek`] corrects a stale one.
+    #[inline]
+    pub fn at(tape: &'a [u32], index: usize) -> Self {
+        Self { tape, next: index }
+    }
+
     /// The tape this cursor walks.
     #[inline]
     pub fn tape(&self) -> &'a [u32] {
