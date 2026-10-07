@@ -1,42 +1,19 @@
 use std::collections::TryReserveError;
+use std::ops::Range;
 
-use crate::IndexMode;
+use crate::ClassifiedBlock;
 
-/// Extra tape slots reserved past the input length so flattening may write
+/// Extra tape slots reserved past the window length so flattening may write
 /// without per-offset bounds checks.
 pub const SAFETY_PADDING: usize = 8;
 
-/// The layout of one block of masks: the structural mask (in
-/// [`IndexMode::Masks`] only), followed by `classes` class masks and
-/// `exacts` exact-byte masks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct MaskLayout {
-    /// Whether the structural mask is stored. In [`IndexMode::Hybrid`] the
-    /// structural lanes go to the tape instead.
-    pub structural: bool,
-    pub classes: usize,
-    pub exacts: usize,
-}
-
-impl MaskLayout {
-    #[inline]
-    pub const fn stride(self) -> usize {
-        self.structural as usize + self.classes + self.exacts
-    }
-
-    /// Slot of class 0 within a block.
-    #[inline]
-    const fn first_class(self) -> usize {
-        self.structural as usize
-    }
-}
-
-/// Reusable storage for the result of one scan.
+/// The result of indexing one window of the input: a tape of structural
+/// offsets and, for specs with mask classes, one mask per class per block.
+/// Reuse it across windows and documents to avoid allocation.
 #[derive(Debug, Clone, Default)]
 pub struct StructuralIndex {
-    mode: IndexMode,
-    layout: MaskLayout,
-    input_len: u32,
+    window: Range<usize>,
+    mask_classes: usize,
     tape: Vec<u32>,
     masks: Vec<u64>,
 }
@@ -46,40 +23,30 @@ impl StructuralIndex {
         Self::default()
     }
 
-    /// Reserve enough space that scanning any input of at most `max_input`
-    /// bytes in `mode` will not allocate.
+    /// Reserve enough space that indexing any window of at most `max_window`
+    /// bytes with `mask_classes` mask classes will not allocate.
     pub fn try_reserve(
         &mut self,
-        mode: IndexMode,
-        layout: MaskLayout,
-        max_input: usize,
+        mask_classes: usize,
+        max_window: usize,
     ) -> Result<(), TryReserveError> {
-        if mode != IndexMode::Masks {
-            let needed = max_input.saturating_add(SAFETY_PADDING);
-            self.tape.clear();
-            self.tape.try_reserve_exact(needed)?;
-        }
-        if mode != IndexMode::Tape {
-            let needed = max_input.div_ceil(64).saturating_mul(layout.stride());
-            self.masks.clear();
-            self.masks.try_reserve_exact(needed)?;
-        }
-        Ok(())
+        self.tape.clear();
+        self.tape
+            .try_reserve_exact(max_window.saturating_add(SAFETY_PADDING))?;
+        self.masks.clear();
+        self.masks
+            .try_reserve_exact(max_window.div_ceil(64).saturating_mul(mask_classes))
     }
 
-    /// Clear for a new scan and grow if `input_len` exceeds the reservation.
-    pub(crate) fn prepare(&mut self, mode: IndexMode, layout: MaskLayout, input_len: usize) {
-        self.mode = mode;
-        self.layout = layout;
-        self.input_len = input_len as u32;
+    /// Clear for a new window and grow if it exceeds the reservation.
+    pub(crate) fn prepare(&mut self, window: Range<usize>, mask_classes: usize) {
+        let len = window.len();
+        self.window = window;
+        self.mask_classes = mask_classes;
         self.tape.clear();
         self.masks.clear();
-        if mode != IndexMode::Masks {
-            self.tape.reserve(input_len + SAFETY_PADDING);
-        }
-        if mode != IndexMode::Tape {
-            self.masks.reserve(input_len.div_ceil(64) * layout.stride());
-        }
+        self.tape.reserve(len + SAFETY_PADDING);
+        self.masks.reserve(len.div_ceil(64) * mask_classes);
     }
 
     /// Append `mask`'s lanes as absolute offsets. Requires the reservation
@@ -102,174 +69,195 @@ impl StructuralIndex {
     }
 
     #[inline]
-    pub(crate) fn push_block(&mut self, structural: u64, masks: &crate::ClassifiedBlock) {
-        if self.layout.structural {
-            self.masks.push(structural);
-        }
+    pub(crate) fn push_masks(&mut self, masks: &ClassifiedBlock) {
         self.masks
-            .extend_from_slice(&masks.class[..self.layout.classes]);
-        self.masks
-            .extend_from_slice(&masks.exact[..self.layout.exacts]);
+            .extend_from_slice(&masks.class[..self.mask_classes]);
+    }
+
+    /// The input range this index covers.
+    #[inline]
+    pub fn window(&self) -> Range<usize> {
+        self.window.clone()
+    }
+
+    /// Ascending absolute offsets of every structural byte in the window.
+    #[inline]
+    pub fn tape(&self) -> &[u32] {
+        &self.tape
     }
 
     #[inline]
-    pub fn mode(&self) -> IndexMode {
-        self.mode
+    pub fn cursor(&self) -> TapeCursor<'_> {
+        TapeCursor::new(&self.tape)
     }
 
+    /// Per-block masks of the spec's mask classes.
     #[inline]
-    pub fn view(&self) -> IndexView<'_> {
-        let masks = MaskView {
+    pub fn masks(&self) -> MaskView<'_> {
+        MaskView {
             masks: &self.masks,
-            layout: self.layout,
-            input_len: self.input_len,
-        };
-        match self.mode {
-            IndexMode::Tape => IndexView::Tape(&self.tape),
-            IndexMode::Masks => IndexView::Masks(masks),
-            IndexMode::Hybrid => IndexView::Hybrid {
-                tape: &self.tape,
-                masks,
-            },
+            classes: self.mask_classes,
+            first_block: self.window.start / 64,
+            end: self.window.end,
         }
     }
 
-    /// Bytes currently allocated for either representation.
+    /// Logical size of the tape and masks in bytes.
+    pub fn bytes(&self) -> usize {
+        size_of_val(self.tape.as_slice()) + size_of_val(self.masks.as_slice())
+    }
+
+    /// Bytes currently allocated.
     pub fn capacity_bytes(&self) -> usize {
         self.tape.capacity() * size_of::<u32>() + self.masks.capacity() * size_of::<u64>()
     }
 }
 
-/// A borrowed scan result in whichever mode it was built.
+/// A forward-moving position on a tape.
+///
+/// Stage 2 mostly asks "where is the next structural of this kind at or
+/// after here?". [`Self::find`] answers that and leaves the cursor on the
+/// match, so asking again from at or before it returns it again. [`Self::seek`]
+/// moves to any offset, galloping forward from the current position before
+/// falling back to binary search, so callers whose own position jumps (after
+/// scanning a token without the tape) stay cheap.
 #[derive(Debug, Clone, Copy)]
-pub enum IndexView<'a> {
-    /// Ascending absolute offsets of every structural byte.
-    Tape(&'a [u32]),
-    /// One group of masks per 64-byte block.
-    Masks(MaskView<'a>),
-    /// Structural offsets on a tape, plus selected class masks per block.
-    Hybrid {
-        tape: &'a [u32],
-        masks: MaskView<'a>,
-    },
+pub struct TapeCursor<'a> {
+    tape: &'a [u32],
+    next: usize,
 }
 
-impl<'a> IndexView<'a> {
+impl<'a> TapeCursor<'a> {
     #[inline]
-    pub fn mode(self) -> IndexMode {
-        match self {
-            Self::Tape(_) => IndexMode::Tape,
-            Self::Masks(_) => IndexMode::Masks,
-            Self::Hybrid { .. } => IndexMode::Hybrid,
-        }
+    pub fn new(tape: &'a [u32]) -> Self {
+        Self { tape, next: 0 }
     }
 
+    /// The tape this cursor walks.
     #[inline]
-    pub fn tape(self) -> Option<&'a [u32]> {
-        match self {
-            Self::Tape(tape) | Self::Hybrid { tape, .. } => Some(tape),
-            Self::Masks(_) => None,
-        }
+    pub fn tape(&self) -> &'a [u32] {
+        self.tape
     }
 
+    /// Index of the current entry on the tape.
     #[inline]
-    pub fn masks(self) -> Option<MaskView<'a>> {
-        match self {
-            Self::Tape(_) => None,
-            Self::Masks(masks) | Self::Hybrid { masks, .. } => Some(masks),
-        }
+    pub fn index(&self) -> usize {
+        self.next
     }
 
-    /// Structural offsets in ascending order, regardless of mode. In mask
-    /// mode offsets are flattened lazily while iterating.
+    /// The current entry's offset, if any remain.
     #[inline]
-    pub fn positions(self) -> Positions<'a> {
-        match self {
-            Self::Tape(tape) | Self::Hybrid { tape, .. } => Positions::Tape(tape.iter()),
-            Self::Masks(masks) => Positions::Masks(masks.structural_positions()),
-        }
+    pub fn peek(&self) -> Option<usize> {
+        self.tape.get(self.next).map(|&offset| offset as usize)
     }
 
-    pub fn structural_count(self) -> usize {
-        match self {
-            Self::Tape(tape) | Self::Hybrid { tape, .. } => tape.len(),
-            Self::Masks(masks) => (0..masks.blocks())
-                .map(|block| masks.structural(block).count_ones() as usize)
-                .sum(),
-        }
+    /// Step past the current entry.
+    #[inline]
+    pub fn advance(&mut self) {
+        self.next += 1;
     }
 
-    /// Logical size of the index in bytes.
-    pub fn bytes(self) -> usize {
-        match self {
-            Self::Tape(tape) => size_of_val(tape),
-            Self::Masks(masks) => size_of_val(masks.masks),
-            Self::Hybrid { tape, masks } => size_of_val(tape) + size_of_val(masks.masks),
+    /// Move to the first entry at or after `offset`.
+    #[inline]
+    pub fn seek(&mut self, offset: usize) {
+        let tape = self.tape;
+        let before = |index: usize| (tape[index] as usize) < offset;
+        if self.next > tape.len() || (self.next > 0 && !before(self.next - 1)) {
+            self.next = tape.partition_point(|&entry| (entry as usize) < offset);
+            return;
         }
+        for _ in 0..8 {
+            if self.next >= tape.len() || !before(self.next) {
+                return;
+            }
+            self.next += 1;
+        }
+        self.next += tape[self.next..].partition_point(|&entry| (entry as usize) < offset);
+    }
+
+    /// The first entry at or after `from` whose byte satisfies `wanted`.
+    /// The cursor is left on the match, or at the end if there is none.
+    #[inline]
+    pub fn find(
+        &mut self,
+        input: &[u8],
+        from: usize,
+        wanted: impl Fn(u8) -> bool,
+    ) -> Option<usize> {
+        self.find_before(input, from, usize::MAX, wanted)
+    }
+
+    /// Like [`Self::find`], but gives up at the first entry at or after
+    /// `limit`, leaving the cursor there.
+    #[inline]
+    pub fn find_before(
+        &mut self,
+        input: &[u8],
+        from: usize,
+        limit: usize,
+        wanted: impl Fn(u8) -> bool,
+    ) -> Option<usize> {
+        self.seek(from);
+        while let Some(offset) = self.peek() {
+            if offset >= limit {
+                return None;
+            }
+            if wanted(input[offset]) {
+                return Some(offset);
+            }
+            self.next += 1;
+        }
+        None
     }
 }
 
-/// Per-block masks produced in [`IndexMode::Masks`] and
-/// [`IndexMode::Hybrid`].
+impl Iterator for TapeCursor<'_> {
+    type Item = usize;
+
+    #[inline]
+    fn next(&mut self) -> Option<usize> {
+        let offset = self.peek()?;
+        self.next += 1;
+        Some(offset)
+    }
+}
+
+/// Per-block masks of a spec's mask classes. Offsets are absolute; only the
+/// indexed window has masks.
 #[derive(Debug, Clone, Copy)]
 pub struct MaskView<'a> {
     masks: &'a [u64],
-    layout: MaskLayout,
-    input_len: u32,
+    classes: usize,
+    first_block: usize,
+    end: usize,
 }
 
 impl<'a> MaskView<'a> {
+    /// Number of mask classes per block.
     #[inline]
-    pub fn blocks(self) -> usize {
-        self.masks.len() / self.layout.stride()
+    pub fn classes(self) -> usize {
+        self.classes
     }
 
+    /// Absolute block range covered.
     #[inline]
-    pub fn layout(self) -> MaskLayout {
-        self.layout
+    pub fn blocks(self) -> Range<usize> {
+        let count = self.masks.len().checked_div(self.classes).unwrap_or(0);
+        self.first_block..self.first_block + count
     }
 
-    #[inline]
-    pub fn input_len(self) -> u32 {
-        self.input_len
-    }
-
-    /// Structural lanes of `block`, as returned by the spec's `scan_block`.
-    /// Only stored in [`IndexMode::Masks`].
-    #[inline]
-    pub fn structural(self, block: usize) -> u64 {
-        assert!(self.layout.structural);
-        self.masks[block * self.layout.stride()]
-    }
-
-    /// Refined class mask `class` of `block`.
+    /// Mask of class `class` in absolute block `block`.
     #[inline]
     pub fn class(self, block: usize, class: usize) -> u64 {
-        assert!(class < self.layout.classes);
-        self.masks[block * self.layout.stride() + self.layout.first_class() + class]
-    }
-
-    /// Refined exact-byte mask `exact` of `block`.
-    #[inline]
-    pub fn exact(self, block: usize, exact: usize) -> u64 {
-        assert!(exact < self.layout.exacts);
-        self.masks
-            [block * self.layout.stride() + self.layout.first_class() + self.layout.classes + exact]
-    }
-
-    /// Offsets of structural lanes, across all blocks.
-    #[inline]
-    pub fn structural_positions(self) -> MaskLanes<'a> {
-        assert!(self.layout.structural);
-        self.lanes(0)
+        assert!(class < self.classes);
+        self.masks[(block - self.first_block) * self.classes + class]
     }
 
     /// Union of the classes selected by `classes` (bit `i` selects class
-    /// `i`) in `block`.
+    /// `i`) in relative block `relative`.
     #[inline]
-    fn union(self, block: usize, classes: u8) -> u64 {
-        let row = &self.masks[block * self.layout.stride() + self.layout.first_class()..]
-            [..self.layout.classes];
+    fn union(self, relative: usize, classes: u8) -> u64 {
+        let row = &self.masks[relative * self.classes..][..self.classes];
         let mut union = 0;
         for (class, mask) in row.iter().enumerate() {
             if classes & (1 << class) != 0 {
@@ -280,57 +268,42 @@ impl<'a> MaskView<'a> {
     }
 
     /// The first offset at or after `from` that belongs to any class
-    /// selected by `classes` (bit `i` selects class `i`).
-    ///
-    /// This is the mask-mode equivalent of advancing along a tape, but the
-    /// caller chooses which classes to stop at for each search.
+    /// selected by `classes` (bit `i` selects class `i`). This is the mask
+    /// equivalent of walking a tape, with the classes chosen per search.
     #[inline]
     pub fn next_in(self, classes: u8, from: usize) -> Option<usize> {
-        self.next_where(from, |block| self.union(block, classes))
-    }
-
-    /// The first structural offset at or after `from`. Only available in
-    /// [`IndexMode::Masks`]; hybrid indexes keep structurals on the tape.
-    #[inline]
-    pub fn next_structural(self, from: usize) -> Option<usize> {
-        assert!(self.layout.structural);
-        let stride = self.layout.stride();
-        self.next_where(from, |block| self.masks[block * stride])
-    }
-
-    #[inline]
-    fn next_where(self, from: usize, mask_of: impl Fn(usize) -> u64) -> Option<usize> {
-        let blocks = self.blocks();
-        let mut block = from / 64;
-        if block >= blocks {
+        let blocks = self.blocks().len();
+        let from = from.max(self.first_block * 64);
+        let mut relative = from / 64 - self.first_block;
+        if relative >= blocks {
             return None;
         }
-        let mut mask = mask_of(block) & (u64::MAX << (from % 64));
+        let mut mask = self.union(relative, classes) & (u64::MAX << (from % 64));
         loop {
             if mask != 0 {
-                return Some(block * 64 + mask.trailing_zeros() as usize);
+                let offset = (self.first_block + relative) * 64 + mask.trailing_zeros() as usize;
+                return (offset < self.end).then_some(offset);
             }
-            block += 1;
-            if block >= blocks {
+            relative += 1;
+            if relative >= blocks {
                 return None;
             }
-            mask = mask_of(block);
+            mask = self.union(relative, classes);
         }
     }
 
     /// The number of consecutive offsets, starting at `from`, that belong to
-    /// class `class`. With a space class this measures indentation in one
-    /// or two mask reads instead of a byte loop.
+    /// class `class`. With a space class this measures indentation in one or
+    /// two mask reads instead of a byte loop.
     #[inline]
     pub fn run_length(self, class: usize, from: usize) -> usize {
-        assert!(class < self.layout.classes);
+        assert!(class < self.classes);
         let blocks = self.blocks();
         let mut block = from / 64;
         let mut lane = from % 64;
         let mut run = 0;
-        while block < blocks {
-            let mask = self.masks[block * self.layout.stride() + self.layout.first_class() + class]
-                >> lane;
+        while blocks.contains(&block) {
+            let mask = self.class(block, class) >> lane;
             let ones = mask.trailing_ones() as usize;
             run += ones;
             if ones < 64 - lane {
@@ -342,69 +315,25 @@ impl<'a> MaskView<'a> {
         run
     }
 
-    /// Offsets of the set lanes of class `class`, across all blocks.
+    /// Offsets of the set lanes of class `class`.
     #[inline]
-    pub fn class_positions(self, class: usize) -> MaskLanes<'a> {
-        assert!(class < self.layout.classes);
-        self.lanes(self.layout.first_class() + class)
-    }
-
-    #[inline]
-    fn lanes(self, slot: usize) -> MaskLanes<'a> {
-        MaskLanes {
-            masks: self.masks,
-            stride: self.layout.stride(),
-            slot,
-            next_block: 0,
-            base: 0,
-            current: 0,
-        }
-    }
-}
-
-/// Lazily flattened offsets of one mask slot.
-#[derive(Debug, Clone)]
-pub struct MaskLanes<'a> {
-    masks: &'a [u64],
-    stride: usize,
-    slot: usize,
-    next_block: usize,
-    base: u32,
-    current: u64,
-}
-
-impl Iterator for MaskLanes<'_> {
-    type Item = u32;
-
-    #[inline]
-    fn next(&mut self) -> Option<u32> {
-        while self.current == 0 {
-            let index = self.next_block * self.stride + self.slot;
-            self.current = *self.masks.get(index)?;
-            self.base = (self.next_block * 64) as u32;
-            self.next_block += 1;
-        }
-        let lane = self.current.trailing_zeros();
-        self.current &= self.current - 1;
-        Some(self.base + lane)
-    }
-}
-
-/// Structural offsets from either representation.
-#[derive(Debug, Clone)]
-pub enum Positions<'a> {
-    Tape(std::slice::Iter<'a, u32>),
-    Masks(MaskLanes<'a>),
-}
-
-impl Iterator for Positions<'_> {
-    type Item = u32;
-
-    #[inline]
-    fn next(&mut self) -> Option<u32> {
-        match self {
-            Self::Tape(tape) => tape.next().copied(),
-            Self::Masks(lanes) => lanes.next(),
-        }
+    pub fn class_positions(self, class: usize) -> impl Iterator<Item = usize> + 'a {
+        assert!(class < self.classes);
+        let first_block = self.first_block;
+        self.masks
+            .chunks_exact(self.classes)
+            .enumerate()
+            .flat_map(move |(relative, row)| {
+                let base = (first_block + relative) * 64;
+                let mut mask = row[class];
+                std::iter::from_fn(move || {
+                    if mask == 0 {
+                        return None;
+                    }
+                    let lane = mask.trailing_zeros() as usize;
+                    mask &= mask - 1;
+                    Some(base + lane)
+                })
+            })
     }
 }

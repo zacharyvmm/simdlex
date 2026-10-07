@@ -1,116 +1,58 @@
-pub mod extract;
-pub mod grammar;
-mod parser;
-pub mod spans;
-pub mod split;
+//! simdjson-style structural indexing as a primitive.
+//!
+//! A two-stage parser first finds the bounds of its grammar's regions with
+//! SIMD (stage 1), then runs a state machine that jumps between those bounds
+//! (stage 2). simdlex provides stage 1 for any grammar whose bounds are
+//! single bytes:
+//!
+//! - [`tablegen`] turns named byte sets into nibble lookup tables at compile
+//!   time, failing the build if they cannot be classified exactly.
+//! - [`Indexer`] runs those tables over 64-byte blocks with a scalar, SSSE3,
+//!   AVX2, or NEON backend and records a tape of structural offsets, plus
+//!   per-block masks for dense classes, whole or in windows.
+//! - [`TapeCursor`] and [`MaskView`] are what a stage-2 state machine walks.
+//!
+//! ```
+//! use simdlex::tablegen::{ByteSet, Tables, generate, unwrap};
+//! use simdlex::{IndexSpec, Indexer, NibbleTables, StructuralIndex};
+//!
+//! const TABLES: Tables<2> = unwrap(generate(&[
+//!     ByteSet::from_bytes(b"<>"),
+//!     ByteSet::from_bytes(b"'\""),
+//! ]));
+//!
+//! /// Tag delimiters and quotes, the bounds an HTML tokenizer searches for.
+//! struct Html;
+//!
+//! impl IndexSpec for Html {
+//!     type State = ();
+//!     type Error = std::convert::Infallible;
+//!     const TABLES: NibbleTables = NibbleTables { low: TABLES.low, high: TABLES.high };
+//!     const CLASS_BITS: [u8; 8] = TABLES.padded_class_bits();
+//!     const CLASS_COUNT: usize = 2;
+//! }
+//!
+//! let input = br#"<a href="x">hi</a>"#;
+//! let mut index = StructuralIndex::new();
+//! Indexer::<Html>::new().index(input, &mut (), &mut index).unwrap();
+//! assert_eq!(index.tape(), [0, 8, 10, 11, 14, 17]);
+//!
+//! let mut cursor = index.cursor();
+//! assert_eq!(cursor.find(input, 1, |byte| byte == b'>'), Some(11));
+//! ```
+//!
+//! The `examples/` directory holds complete grammars built on this crate:
+//! an HTML element stream, a JSON parser compared against simdjson, and a
+//! YAML event stream.
 
-/// Stage 1 execution: backends, tape and mask storage.
-pub use simdlex_index as index;
+pub use simdlex_index::*;
+
 /// Compile-time nibble table generation.
-pub use simdlex_tablegen as tablegen;
-
-pub use extract::{
-    extract_candidates, extract_class_tokens, extract_tokens, html::extract_class_spans,
-};
-pub use grammar::{
-    Grammar, HtmlAttribute, HtmlAttributeValue, HtmlAttributes, HtmlConfig, HtmlEmit, HtmlError,
-    HtmlErrorKind, HtmlEvent, HtmlGrammar, HtmlReader, HtmlStage1State, HtmlStartElement,
-    HtmlStreamEvent, HtmlStreamGrammar, YamlBlockScalar, YamlChomping, YamlCollectionStyle,
-    YamlConfig, YamlError, YamlErrorKind, YamlEvent, YamlGrammar, YamlProperties, YamlScalar,
-    YamlScalarStyle, YamlStage2State, decode_yaml_scalar,
-};
-#[cfg(any(feature = "json-test-grammar", test))]
-pub use grammar::{
-    JsonConfig, JsonError, JsonErrorKind, JsonEvent, JsonGrammar, RawJsonString, decode_json_string,
-};
-pub use parser::{CapacityError, ParseStats, Parser, Stage1Stats};
-pub use simdlex_index::{
-    BackendError, BackendKind, ClassifiedBlock, IndexMode, IndexSpec, IndexView, MaskView,
-    NibbleTables, Positions, Utf8Policy,
-};
-pub use spans::{
-    CandidateOrigin, CandidateSyntax, ClassCandidate, ClassSpan, ClassToken, Diagnostic,
-    DiagnosticKind, Document, DocumentKind, ExtractOptions, ExtractResult, Span,
-};
-pub use split::{split_candidate_tokens, split_class_tokens};
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn routes_html_candidates() {
-        let html = br#"<div class="px-4 font-bold"></div>"#;
-        let result = extract_candidates(html, DocumentKind::Html, &ExtractOptions::default());
-
-        assert!(result.diagnostics.is_empty());
-        assert_eq!(
-            result.items,
-            vec![ClassCandidate {
-                value: Span { start: 12, end: 26 },
-                syntax: CandidateSyntax::StaticString,
-                origin: CandidateOrigin::HtmlAttribute,
-            }]
-        );
-    }
-
-    #[test]
-    fn extracts_routed_html_tokens() {
-        let html = br#"<div class="px-4 font-bold"></div>"#;
-        let result = extract_class_tokens(html, DocumentKind::Html, &ExtractOptions::default());
-
-        assert!(result.diagnostics.is_empty());
-        assert_eq!(
-            result
-                .items
-                .iter()
-                .map(|token| (token.text, token.span, token.origin))
-                .collect::<Vec<_>>(),
-            vec![
-                (
-                    "px-4",
-                    Span { start: 12, end: 16 },
-                    CandidateOrigin::HtmlAttribute
-                ),
-                (
-                    "font-bold",
-                    Span { start: 17, end: 26 },
-                    CandidateOrigin::HtmlAttribute
-                )
-            ]
-        );
-    }
-
-    #[test]
-    fn extract_tokens_accepts_document() {
-        let document = Document {
-            source: br#"<div class="a b"></div>"#,
-            kind: DocumentKind::Html,
-        };
-        let result = extract_tokens(document, &ExtractOptions::default());
-
-        assert_eq!(
-            result
-                .items
-                .iter()
-                .map(|token| token.text)
-                .collect::<Vec<_>>(),
-            vec!["a", "b"]
-        );
-    }
-
-    #[test]
-    fn size_limit_returns_diagnostic() {
-        let options = ExtractOptions {
-            max_file_size: Some(4),
-            ..ExtractOptions::default()
-        };
-        let result = extract_candidates(b"<div></div>", DocumentKind::Html, &options);
-
-        assert!(result.items.is_empty());
-        assert_eq!(
-            result.diagnostics[0].kind,
-            DiagnosticKind::MaxFileSizeExceeded { max: 4, actual: 11 }
-        );
-    }
+pub mod tablegen {
+    pub use simdlex_tablegen::*;
 }
+
+/// Compiles the README's example as a doctest.
+#[doc = include_str!("../README.md")]
+#[cfg(doctest)]
+pub struct ReadmeDoctests;

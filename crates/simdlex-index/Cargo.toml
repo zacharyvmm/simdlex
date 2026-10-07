@@ -2,7 +2,7 @@
 name = "simdlex-index"
 version = "0.1.0"
 edition = "2024"
-description = "Grammar-neutral SIMD execution of nibble tables into a structural tape or block masks"
+description = "Grammar-neutral SIMD structural indexing: a tape of offsets plus optional per-block masks"
 
 [dependencies]
 

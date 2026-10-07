@@ -2,32 +2,18 @@
 name = "simdlex"
 version = "0.1.0"
 edition = "2024"
+description = "simdjson-style structural indexing as a primitive for any byte-level grammar"
+license = "MIT"
+repository = "https://github.com/zacharyvmm/simdlex"
+autoexamples = false
 
 [workspace]
-members = ["crates/simdlex-tablegen", "crates/simdlex-index"]
+members = ["crates/simdlex-tablegen", "crates/simdlex-index", "examples/*"]
 
-[features]
-default = []
-json-test-grammar = []
+[workspace.dependencies]
+simdlex = { path = "." }
+criterion = "0.5"
 
 [dependencies]
 simdlex-index = { path = "crates/simdlex-index" }
 simdlex-tablegen = { path = "crates/simdlex-tablegen" }
-
-[dev-dependencies]
-criterion = "0.5"
-serde_json = "1"
-yaml-rust2 = "0.13.0"
-
-[[bench]]
-name = "class_spans"
-harness = false
-
-[[bench]]
-name = "grammar_parser"
-harness = false
-required-features = ["json-test-grammar"]
-
-[[example]]
-name = "reference_bench"
-required-features = ["json-test-grammar"]

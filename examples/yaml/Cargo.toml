@@ -1,0 +1,17 @@
+[package]
+name = "simdlex-yaml"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Example: a YAML event stream on simdlex masks and a quote tape"
+
+[dependencies]
+simdlex = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+yaml-rust2 = "0.13.0"
+
+[[bench]]
+name = "yaml"
+harness = false
