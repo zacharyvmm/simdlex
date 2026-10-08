@@ -840,6 +840,36 @@ fn bounded_parser_reports_unreservable_depth() {
     );
 }
 
+#[test]
+fn decoding_rejects_malformed_caller_scalars() {
+    let decode = |raw: &'static [u8], style| {
+        let scalar = YamlScalar {
+            raw,
+            span: Span { start: 10, end: 10 },
+            style,
+            properties: YamlProperties::default(),
+        };
+        decode_yaml_scalar(&scalar, &mut String::new()).map(str::to_owned)
+    };
+    let single = YamlScalarStyle::SingleQuoted;
+    let double = YamlScalarStyle::DoubleQuoted;
+    assert_eq!(decode(b"it''s", single).unwrap(), "it's");
+    assert_eq!(
+        decode(b"don't", single),
+        Err(error(YamlErrorKind::InvalidEscape, 13))
+    );
+    assert_eq!(
+        decode(b"x'", single),
+        Err(error(YamlErrorKind::InvalidEscape, 11))
+    );
+    assert_eq!(
+        decode(b"a\\", double),
+        Err(error(YamlErrorKind::InvalidEscape, 11))
+    );
+    assert_eq!(decode(b"a\"b", double).unwrap(), "a\"b");
+    assert_eq!(decode(b"a'b\\", YamlScalarStyle::Plain).unwrap(), "a'b\\");
+}
+
 // ----- differential and property tests -----
 
 const CORPUS: &[&str] = &[

@@ -538,6 +538,33 @@ mod tests {
         }
     }
 
+    /// [`Demo`] with every class on the tape.
+    struct TapeOnly;
+
+    impl IndexSpec for TapeOnly {
+        type State = ();
+        type Error = ();
+
+        const TABLES: NibbleTables = Demo::TABLES;
+        const CLASS_BITS: [u8; 8] = Demo::CLASS_BITS;
+        const CLASS_COUNT: usize = Demo::CLASS_COUNT;
+    }
+
+    #[test]
+    fn indexes_without_mask_classes_have_no_mask_blocks() {
+        let indexer = Indexer::<TapeOnly>::new();
+        let mut index = StructuralIndex::new();
+        for len in [0, 1, 64, 65, 200] {
+            let input = b"<a=b> ".repeat(40);
+            indexer.index(&input[..len], &mut (), &mut index).unwrap();
+            let masks = index.masks();
+            assert_eq!(masks.classes(), 0);
+            assert!(masks.blocks().is_empty());
+            assert_eq!(masks.next_in(0b111, 0), None);
+            assert_eq!(index.bytes(), size_of_val(index.tape()));
+        }
+    }
+
     #[test]
     fn reserved_index_is_reused() {
         let indexer = Indexer::<Demo>::new();
