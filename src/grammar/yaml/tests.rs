@@ -554,6 +554,28 @@ fn lone_carriage_returns_break_lines() {
 }
 
 #[test]
+fn block_scalars_keep_trailing_lone_carriage_returns() {
+    assert_events(
+        "a: |+\r  x\r\r\nb: |\r\n  y\r\n\r\rc: |-\r  z\r\n\n\rd: >+\n  p\r  q\r\r\ne: >\r  r\r\r",
+        "+DOC
+         +MAP
+         =VAL :a
+         =VAL |x\\n\\n
+         =VAL :b
+         =VAL |y\\n
+         =VAL :c
+         =VAL |z
+         =VAL :d
+         =VAL >p q\\n\\n
+         =VAL :e
+         =VAL >r\\n
+         -MAP
+         -DOC",
+    );
+    assert_eq!(render("k: |+\r  a\r\r").unwrap()[3], "=VAL |a\\n\\n");
+}
+
+#[test]
 fn document_markers_end_multi_line_scalars() {
     let kind = |input: &str| render(input).unwrap_err();
     assert_eq!(
