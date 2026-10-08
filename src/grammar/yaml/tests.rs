@@ -613,6 +613,43 @@ fn document_markers_end_multi_line_scalars() {
 }
 
 #[test]
+fn document_markers_end_block_scalar_indentation_detection() {
+    // yaml-rust2 runs zero-indented block scalars over marker lines (see
+    // `equivalent`), so these follow the spec instead.
+    for style in ['|', '>'] {
+        assert_eq!(
+            render(&format!("--- {style}\n  \n---\nx\n")).unwrap(),
+            lines(&format!(
+                "+DOC ---\n=VAL {style}\n-DOC\n+DOC ---\n=VAL :x\n-DOC"
+            )),
+            "{style}"
+        );
+        assert_eq!(
+            render(&format!("--- {style}\n   \n  \n...\n")).unwrap(),
+            lines(&format!("+DOC ---\n=VAL {style}\n-DOC ...")),
+            "{style}"
+        );
+    }
+    assert_events(
+        "a: |\n  \n---\nx\n",
+        "+DOC
+         +MAP
+         =VAL :a
+         =VAL |
+         -MAP
+         -DOC
+         +DOC ---
+         =VAL :x
+         -DOC",
+    );
+    // An indented marker is content, less indented than the empty line.
+    assert_eq!(
+        render("--- |\n  \n ---\n").unwrap_err(),
+        error(YamlErrorKind::BadIndentation, 9)
+    );
+}
+
+#[test]
 fn documents_comments_and_directives() {
     assert_events(
         "# leading comment\n%YAML 1.2\n---\na: 1 # trailing\n...\n--- text\n---\n- x\n",

@@ -527,8 +527,7 @@ where
             }
             if indent as i64 <= parent_indent
                 || self.input[first] == b'#'
-                || (indent == 0
-                    && (self.is_document_marker(line, b'-') || self.is_document_marker(line, b'.')))
+                || (indent == 0 && self.is_document_boundary(line))
             {
                 break;
             }
@@ -612,7 +611,9 @@ where
                     let spaces = self.masks.run_length(SPACE, line);
                     let first = line + spaces;
                     if first < len && !is_break(input[first]) {
-                        first_content = Some((spaces as i64, line));
+                        if spaces > 0 || !self.is_document_boundary(line) {
+                            first_content = Some((spaces as i64, line));
+                        }
                         break;
                     }
                     longest_empty = longest_empty.max(spaces as i64);
@@ -637,10 +638,7 @@ where
             let first = line + spaces;
             let blank = first >= len || is_break(input[first]);
             if !blank
-                && ((spaces as i64) < indent
-                    || (spaces == 0
-                        && (self.is_document_marker(line, b'-')
-                            || self.is_document_marker(line, b'.'))))
+                && ((spaces as i64) < indent || (spaces == 0 && self.is_document_boundary(line)))
             {
                 break;
             }
@@ -1167,12 +1165,18 @@ where
     fn breaks_before(&self, mut feed: usize, to: usize) -> Option<usize> {
         while feed < to {
             let line = feed + 1;
-            if self.is_document_marker(line, b'-') || self.is_document_marker(line, b'.') {
+            if self.is_document_boundary(line) {
                 return None;
             }
             feed = self.line_end(line);
         }
         Some(feed)
+    }
+
+    /// Whether `line` starts with a `---` or `...` marker.
+    #[inline]
+    fn is_document_boundary(&self, line: usize) -> bool {
+        self.is_document_marker(line, b'-') || self.is_document_marker(line, b'.')
     }
 
     #[inline]
