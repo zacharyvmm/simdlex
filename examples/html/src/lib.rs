@@ -35,6 +35,7 @@
 //! }
 //! ```
 
+use std::collections::TryReserveError;
 use std::convert::Infallible;
 use std::fmt;
 
@@ -103,11 +104,10 @@ impl HtmlParser {
 
     /// Reserve for documents of up to `max_input` bytes, so later calls to
     /// [`Self::events`] do not allocate.
-    pub fn with_capacity(max_input: usize) -> Self {
+    pub fn with_capacity(max_input: usize) -> Result<Self, TryReserveError> {
         let mut parser = Self::new();
-        Indexer::<HtmlSpec>::reserve(&mut parser.index, max_input)
-            .expect("could not reserve the structural index");
-        parser
+        Indexer::<HtmlSpec>::reserve(&mut parser.index, max_input)?;
+        Ok(parser)
     }
 
     /// Index `input` and stream its events.
@@ -865,5 +865,10 @@ mod tests {
             let actual: Vec<_> = parser.events(input).collect();
             assert_eq!(actual, expected, "{:?}", String::from_utf8_lossy(input));
         }
+    }
+
+    #[test]
+    fn bounded_parser_reports_unreservable_capacity() {
+        assert!(HtmlParser::with_capacity(usize::MAX).is_err());
     }
 }

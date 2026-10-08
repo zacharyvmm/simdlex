@@ -492,6 +492,17 @@ fn reports_errors_with_offsets() {
     );
 }
 
+#[test]
+fn bounded_parser_reports_unreservable_depth() {
+    let config = YamlConfig {
+        max_depth: usize::MAX,
+    };
+    assert_eq!(
+        YamlParser::with_capacity(config, 64).unwrap_err(),
+        error(YamlErrorKind::Capacity, 64)
+    );
+}
+
 // ----- differential and property tests -----
 
 const CORPUS: &[&str] = &[

@@ -283,26 +283,36 @@ impl JsonParser {
     }
 
     pub fn with_backend(config: JsonConfig, backend: BackendKind) -> Result<Self, BackendError> {
-        let mut stage2 = JsonStage2State::default();
-        stage2.frames.reserve(config.max_depth);
-        Ok(Self {
-            config,
-            indexer: Indexer::with_backend(backend)?,
-            index: StructuralIndex::new(),
-            stage1: JsonStage1State::default(),
-            stage2,
-            max_input: None,
-        })
+        let mut parser = Self::unreserved(config, backend)?;
+        parser.stage2.frames.reserve(parser.config.max_depth);
+        Ok(parser)
     }
 
     /// Reserve for documents of up to `max_input` bytes, so later parses do
     /// not allocate; larger documents are rejected.
     pub fn with_capacity(config: JsonConfig, max_input: usize) -> Result<Self, JsonError> {
-        let mut parser = Self::new(config);
-        Indexer::<JsonSpec>::reserve(&mut parser.index, max_input)
-            .map_err(|_| error(JsonErrorKind::Capacity, max_input as u32))?;
+        let mut parser = Self::unreserved(config, BackendKind::Auto)
+            .expect("the automatically selected backend must be available");
+        let capacity_error = |_| error(JsonErrorKind::Capacity, max_input as u32);
+        parser
+            .stage2
+            .frames
+            .try_reserve_exact(parser.config.max_depth)
+            .map_err(capacity_error)?;
+        Indexer::<JsonSpec>::reserve(&mut parser.index, max_input).map_err(capacity_error)?;
         parser.max_input = Some(max_input);
         Ok(parser)
+    }
+
+    fn unreserved(config: JsonConfig, backend: BackendKind) -> Result<Self, BackendError> {
+        Ok(Self {
+            config,
+            indexer: Indexer::with_backend(backend)?,
+            index: StructuralIndex::new(),
+            stage1: JsonStage1State::default(),
+            stage2: JsonStage2State::default(),
+            max_input: None,
+        })
     }
 
     pub fn backend(&self) -> BackendKind {
@@ -1054,5 +1064,14 @@ break"]"#,
             parser.stage1(&[b' '; 129]).unwrap_err().kind,
             JsonErrorKind::Capacity
         );
+    }
+
+    #[test]
+    fn bounded_parser_reports_unreservable_depth() {
+        let config = JsonConfig {
+            max_depth: usize::MAX,
+        };
+        let error = JsonParser::with_capacity(config, 64).unwrap_err();
+        assert_eq!(error.kind, JsonErrorKind::Capacity);
     }
 }

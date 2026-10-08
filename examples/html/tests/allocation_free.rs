@@ -48,7 +48,7 @@ static ALLOCATOR: CountingAllocator = CountingAllocator;
 #[test]
 fn bounded_warm_parser_allocates_nothing() {
     let html = br#"<div class="px-4 py-2"><span className='font-bold'></span></div>"#;
-    let mut parser = HtmlParser::with_capacity(256);
+    let mut parser = HtmlParser::with_capacity(256).unwrap();
     let warm = parser.events(html).count();
 
     // The counter must see a known allocation, or this test proves nothing.

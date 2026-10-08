@@ -256,23 +256,34 @@ impl YamlParser {
     }
 
     pub fn with_backend(config: YamlConfig, backend: BackendKind) -> Result<Self, BackendError> {
-        Ok(Self {
-            frames: Vec::with_capacity(config.max_depth),
-            config,
-            indexer: Indexer::with_backend(backend)?,
-            index: StructuralIndex::new(),
-            max_input: None,
-        })
+        let mut parser = Self::unreserved(config, backend)?;
+        parser.frames.reserve_exact(parser.config.max_depth);
+        Ok(parser)
     }
 
     /// Reserve for documents of up to `max_input` bytes, so later parses do
     /// not allocate; larger documents are rejected.
     pub fn with_capacity(config: YamlConfig, max_input: usize) -> Result<Self, YamlError> {
-        let mut parser = Self::new(config);
-        Indexer::<YamlSpec>::reserve(&mut parser.index, max_input)
-            .map_err(|_| error(YamlErrorKind::Capacity, max_input))?;
+        let mut parser = Self::unreserved(config, BackendKind::Auto)
+            .expect("the automatically selected backend must be available");
+        let capacity_error = |_| error(YamlErrorKind::Capacity, max_input);
+        parser
+            .frames
+            .try_reserve_exact(parser.config.max_depth)
+            .map_err(capacity_error)?;
+        Indexer::<YamlSpec>::reserve(&mut parser.index, max_input).map_err(capacity_error)?;
         parser.max_input = Some(max_input);
         Ok(parser)
+    }
+
+    fn unreserved(config: YamlConfig, backend: BackendKind) -> Result<Self, BackendError> {
+        Ok(Self {
+            config,
+            indexer: Indexer::with_backend(backend)?,
+            index: StructuralIndex::new(),
+            frames: Vec::new(),
+            max_input: None,
+        })
     }
 
     pub fn backend(&self) -> BackendKind {
