@@ -422,6 +422,29 @@ fn anchors_aliases_and_tags() {
 }
 
 #[test]
+fn verbatim_tags_end_at_their_closing_bracket() {
+    // The URI may contain flow indicators.
+    assert_events(
+        "a: !<tag:yaml.org,2002:str> foo\nb: [!<tag:yaml.org,2002:str> foo, !<x>]\n",
+        "+DOC
+         +MAP
+         =VAL :a
+         =VAL <!<tag:yaml.org,2002:str>> :foo
+         =VAL :b
+         +SEQ []
+         =VAL <!<tag:yaml.org,2002:str>> :foo
+         =VAL <!<x>> :
+         -SEQ
+         -MAP
+         -DOC",
+    );
+    let kind = |input: &str| render(input).unwrap_err();
+    assert_eq!(kind("a: !<x y"), error(YamlErrorKind::UnexpectedContent, 3));
+    assert_eq!(kind("a: !<x>y"), error(YamlErrorKind::UnexpectedContent, 3));
+    assert_eq!(kind("a: !<> y"), error(YamlErrorKind::UnexpectedContent, 3));
+}
+
+#[test]
 fn documents_comments_and_directives() {
     assert_events(
         "# leading comment\n%YAML 1.2\n---\na: 1 # trailing\n...\n--- text\n---\n- x\n",

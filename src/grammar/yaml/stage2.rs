@@ -865,13 +865,36 @@ where
                     at = self.skip_blanks(end);
                 }
                 Some(b'!') if properties.tag.is_none() => {
-                    let end = self.token_end(at);
+                    let end = if input.get(at + 1) == Some(&b'<') {
+                        self.verbatim_tag_end(at)?
+                    } else {
+                        self.token_end(at)
+                    };
                     properties.tag = Some(&input[at..end]);
                     at = self.skip_blanks(end);
                 }
                 Some(b'&' | b'!') => return Err(error(YamlErrorKind::UnexpectedContent, at)),
                 _ => return Ok((properties, at)),
             }
+        }
+    }
+
+    /// End of a verbatim tag such as `!<tag:yaml.org,2002:str>`, whose URI
+    /// may contain flow indicators, so it ends only at its `>`.
+    fn verbatim_tag_end(&self, at: usize) -> Result<usize, YamlError> {
+        let input = self.input;
+        let uri = at + 2;
+        let close = input[uri..]
+            .iter()
+            .position(|&byte| byte == b'>' || is_blank_or_break(byte))
+            .map(|offset| uri + offset);
+        match close {
+            Some(close)
+                if close > uri && input[close] == b'>' && self.ends_flow_token(close + 1) =>
+            {
+                Ok(close + 1)
+            }
+            _ => Err(error(YamlErrorKind::UnexpectedContent, at)),
         }
     }
 
