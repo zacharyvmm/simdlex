@@ -48,6 +48,7 @@ comment, DOCTYPE, and bogus-comment states:
   self-closing;
 - the first byte of an attribute name is always part of it (`<a =b>`);
 - `<!-->` and `<!--->` are empty comments, and `--!>` also closes a comment;
+  a comment cut off by the end of input omits a trailing `-`, `--`, or `--!`;
 - `</>` is ignored; `</ x>`, `<?…>`, and `<!…>` are bogus comments;
 - a tag cut off by the end of input is dropped.
 

@@ -114,11 +114,15 @@ impl<'a> HtmlStartElement<'a> {
 
 impl PartialEq for HtmlStartElement<'_> {
     fn eq(&self, other: &Self) -> bool {
+        // Attributes parse deterministically from their bytes and offsets.
+        let attributes = |element: &Self| {
+            &element.input[element.attributes_start as usize..element.attributes_end as usize]
+        };
         self.name == other.name
             && self.span == other.span
             && self.self_closing == other.self_closing
             && self.attributes_start == other.attributes_start
-            && self.attributes_end == other.attributes_end
+            && attributes(self) == attributes(other)
     }
 }
 
@@ -512,7 +516,10 @@ impl<'a, P: Iterator<Item = u32>> HtmlReader<'a, P> {
         let mut from = content_start;
         let (content_end, end) = loop {
             let Some(gt) = self.structurals.find(input, from, b'>') else {
-                break (input.len(), input.len());
+                break (
+                    content_start + unclosed_comment_len(&input[content_start..]),
+                    input.len(),
+                );
             };
             from = gt + 1;
             // `-->` may overlap the opener (`<!-->`, `<!--->`); `--!>` may not.
@@ -610,6 +617,20 @@ const RAW_TEXT_ELEMENTS: [&[u8]; 8] = [
     b"noembed",
     b"noframes",
 ];
+
+/// The length of a comment's data when the input ends inside it: a pending
+/// `-`, `--`, or `--!` is part of the closing marker, not the data.
+fn unclosed_comment_len(content: &[u8]) -> usize {
+    if content.ends_with(b"--!") {
+        return content.len() - 3;
+    }
+    let dashes = content
+        .iter()
+        .rev()
+        .take(2)
+        .take_while(|&&byte| byte == b'-');
+    content.len() - dashes.count()
+}
 
 #[inline]
 fn is_ws(byte: u8) -> bool {
@@ -800,6 +821,17 @@ mod tests {
     }
 
     #[test]
+    fn start_elements_compare_attribute_values() {
+        let first = |input: &'static [u8]| {
+            HtmlReader::from_positions(input, 0..input.len() as u32)
+                .next()
+                .unwrap()
+        };
+        assert_eq!(first(b"<a x='1'>"), first(b"<a x='1'>"));
+        assert_ne!(first(b"<a x='1'>"), first(b"<a x='2'>"));
+    }
+
+    #[test]
     fn treats_stray_markup_as_text_or_bogus_comments() {
         assert_eq!(stream(b"a < b <3 <>"), ["|a < b <3 <>"]);
         assert_eq!(stream(b"a</>b"), ["|a", "|b"]);
@@ -820,6 +852,24 @@ mod tests {
         );
         assert_eq!(stream(b"<!--x>"), ["!x>"]);
         assert_eq!(stream(b"<!--!>-->"), ["!!>"]);
+    }
+
+    #[test]
+    fn drops_pending_comment_ends_at_end_of_input() {
+        assert_eq!(stream(b"<!--x"), ["!x"]);
+        assert_eq!(stream(b"<!--x-"), ["!x"]);
+        assert_eq!(stream(b"<!--x--"), ["!x"]);
+        assert_eq!(stream(b"<!--x---"), ["!x-"]);
+        assert_eq!(stream(b"<!--x--!"), ["!x"]);
+        assert_eq!(stream(b"<!--x-!"), ["!x-!"]);
+        assert_eq!(stream(b"<!---"), ["!"]);
+        assert_eq!(stream(b"<!----!"), ["!"]);
+
+        let mut reader = HtmlReader::from_positions(b"<!--x--", 0..7);
+        let Some(HtmlStreamEvent::Comment { span: comment, .. }) = reader.next() else {
+            panic!("expected comment");
+        };
+        assert_eq!(comment, span(4, 5));
     }
 
     #[test]
