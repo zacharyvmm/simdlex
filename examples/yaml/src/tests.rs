@@ -422,6 +422,78 @@ fn anchors_aliases_and_tags() {
 }
 
 #[test]
+fn verbatim_tags_end_at_their_closing_bracket() {
+    // The URI may contain flow indicators.
+    assert_events(
+        "a: !<tag:yaml.org,2002:str> foo\nb: [!<tag:yaml.org,2002:str> foo, !<x>]\n",
+        "+DOC
+         +MAP
+         =VAL :a
+         =VAL <!<tag:yaml.org,2002:str>> :foo
+         =VAL :b
+         +SEQ []
+         =VAL <!<tag:yaml.org,2002:str>> :foo
+         =VAL <!<x>> :
+         -SEQ
+         -MAP
+         -DOC",
+    );
+    let kind = |input: &str| render(input).unwrap_err();
+    assert_eq!(kind("a: !<x y"), error(YamlErrorKind::UnexpectedContent, 3));
+    assert_eq!(kind("a: !<x>y"), error(YamlErrorKind::UnexpectedContent, 3));
+    assert_eq!(kind("a: !<> y"), error(YamlErrorKind::UnexpectedContent, 3));
+}
+
+#[test]
+fn flow_properties_span_lines() {
+    assert_events(
+        "[&a\n  !foo value, &b # comment\n  !bar\n]\n",
+        "+DOC
+         +SEQ []
+         =VAL &a <!foo> :value
+         =VAL &b <!bar> :
+         -SEQ
+         -DOC",
+    );
+    assert_events(
+        "{k: !foo\n  &a v}\n",
+        "+DOC
+         +MAP {}
+         =VAL :k
+         =VAL &a <!foo> :v
+         -MAP
+         -DOC",
+    );
+}
+
+#[test]
+fn aliases_as_block_mapping_keys() {
+    assert_events(
+        "&a foo: 1\n*a : 2\nseq:\n- *a : 3\n",
+        "+DOC
+         +MAP
+         =VAL &a :foo
+         =VAL :1
+         =ALI *a
+         =VAL :2
+         =VAL :seq
+         +SEQ
+         +MAP
+         =ALI *a
+         =VAL :3
+         -MAP
+         -SEQ
+         -MAP
+         -DOC",
+    );
+    let kind = |input: &str| render(input).unwrap_err();
+    assert_eq!(
+        kind("a: 1\n&b *a : 2"),
+        error(YamlErrorKind::UnexpectedContent, 8)
+    );
+}
+
+#[test]
 fn documents_comments_and_directives() {
     assert_events(
         "# leading comment\n%YAML 1.2\n---\na: 1 # trailing\n...\n--- text\n---\n- x\n",

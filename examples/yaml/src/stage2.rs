@@ -265,7 +265,7 @@ where
                 continue;
             }
 
-            let (properties, after) = self.properties(at)?;
+            let (properties, after) = self.properties(at, false)?;
             if !properties.is_empty() && self.at_line_end(after) {
                 // Properties of a node that starts on a later line.
                 if !nested {
@@ -279,21 +279,21 @@ where
                 return Err(error(YamlErrorKind::Unsupported, after));
             }
 
-            if let Some((key, colon)) = self.implicit_key(after)? {
+            if let Some((key, colon)) = self.implicit_key(after, properties)? {
                 if nested {
                     let pending = self.pending.take().unwrap();
                     self.open_block(Kind::BlockMap, col, pending.properties, at)?;
                 } else if self.top_kind() != Some(Kind::BlockMap) {
                     return Err(error(YamlErrorKind::UnexpectedContent, at));
                 }
-                self.emit(YamlEvent::Scalar(YamlScalar { properties, ..key }));
+                self.emit(key);
                 self.pending = Some(Pending {
                     parent_indent: col,
                     parent: Parent::Map,
                     properties: YamlProperties::default(),
                 });
                 let value = self.skip_blanks(colon + 1);
-                let (properties, value) = self.properties(value)?;
+                let (properties, value) = self.properties(value, false)?;
                 self.pending.as_mut().unwrap().properties = properties;
                 if self.at_line_end(value) {
                     return Ok(self.next_line(value));
@@ -365,14 +365,25 @@ where
         }
     }
 
-    /// If a single-line implicit key starts at `at`, returns it and the
-    /// offset of its `:`.
-    fn implicit_key(&self, at: usize) -> Result<Option<(YamlScalar<'a>, usize)>, YamlError> {
+    /// If a single-line implicit key starts at `at`, returns its event and
+    /// the offset of its `:`.
+    fn implicit_key(
+        &self,
+        at: usize,
+        properties: YamlProperties<'a>,
+    ) -> Result<Option<(YamlEvent<'a>, usize)>, YamlError> {
         let input = self.input;
         let line_end = self.line_end(at);
+        let key = |start, end, style| {
+            YamlEvent::Scalar(YamlScalar {
+                properties,
+                ..self.make_scalar(start, end, style)
+            })
+        };
         let quoted = match input[at] {
             b'"' => Some((self.double_quote_end(at), YamlScalarStyle::DoubleQuoted)),
             b'\'' => Some((self.single_quote_end(at), YamlScalarStyle::SingleQuoted)),
+            b'*' => return self.alias_key(at, properties),
             _ => None,
         };
         if let Some((close, style)) = quoted {
@@ -386,7 +397,7 @@ where
             }
             let colon = self.skip_blanks(close + 1);
             if input.get(colon) == Some(&b':') && self.ends_token(colon + 1) {
-                return Ok(Some((self.make_scalar(at + 1, close, style), colon)));
+                return Ok(Some((key(at + 1, close, style), colon)));
             }
             return Ok(None);
         }
@@ -401,13 +412,32 @@ where
                 }
             } else if self.ends_token(found + 1) {
                 let end = self.trim_end(at, found);
-                return Ok(Some((
-                    self.make_scalar(at, end, YamlScalarStyle::Plain),
-                    found,
-                )));
+                return Ok(Some((key(at, end, YamlScalarStyle::Plain), found)));
             }
         }
         Ok(None)
+    }
+
+    /// An alias used as an implicit key: `*a : b`. Anchor names may contain
+    /// `:`, so the indicator must be separated from the name.
+    fn alias_key(
+        &self,
+        at: usize,
+        properties: YamlProperties<'a>,
+    ) -> Result<Option<(YamlEvent<'a>, usize)>, YamlError> {
+        let end = self.token_end(at + 1);
+        let colon = self.skip_blanks(end);
+        if self.input.get(colon) != Some(&b':') || !self.ends_token(colon + 1) {
+            return Ok(None);
+        }
+        if !properties.is_empty() {
+            return Err(error(YamlErrorKind::UnexpectedContent, at));
+        }
+        let alias = YamlEvent::Alias {
+            name: &self.input[at + 1..end],
+            span: span(at + 1, end),
+        };
+        Ok(Some((alias, colon)))
     }
 
     /// A plain scalar in block context, possibly continued on more-indented
@@ -648,8 +678,7 @@ where
     /// One node inside a flow collection. Returns the offset after it.
     fn flow_node(&mut self, at: usize) -> Result<usize, YamlError> {
         let input = self.input;
-        let (properties, after) = self.properties(at)?;
-        let at = self.skip_flow_space(after);
+        let (properties, at) = self.properties(at, true)?;
         let Some(&byte) = input.get(at) else {
             return Err(error(YamlErrorKind::UnterminatedFlow, at));
         };
@@ -794,9 +823,21 @@ where
         }
     }
 
-    /// Optional `&anchor` and `!tag`, in either order.
-    fn properties(&self, mut at: usize) -> Result<(YamlProperties<'a>, usize), YamlError> {
+    /// Optional `&anchor` and `!tag`, in either order. In flow context they
+    /// may be separated by line breaks and comments.
+    fn properties(
+        &self,
+        mut at: usize,
+        flow: bool,
+    ) -> Result<(YamlProperties<'a>, usize), YamlError> {
         let input = self.input;
+        let separate = |at| {
+            if flow {
+                self.skip_flow_space(at)
+            } else {
+                self.skip_blanks(at)
+            }
+        };
         let mut properties = YamlProperties::default();
         loop {
             match input.get(at) {
@@ -806,16 +847,39 @@ where
                         return Err(error(YamlErrorKind::UnexpectedContent, at));
                     }
                     properties.anchor = Some(&input[at + 1..end]);
-                    at = self.skip_blanks(end);
+                    at = separate(end);
                 }
                 Some(b'!') if properties.tag.is_none() => {
-                    let end = self.token_end(at);
+                    let end = if input.get(at + 1) == Some(&b'<') {
+                        self.verbatim_tag_end(at)?
+                    } else {
+                        self.token_end(at)
+                    };
                     properties.tag = Some(&input[at..end]);
-                    at = self.skip_blanks(end);
+                    at = separate(end);
                 }
                 Some(b'&' | b'!') => return Err(error(YamlErrorKind::UnexpectedContent, at)),
                 _ => return Ok((properties, at)),
             }
+        }
+    }
+
+    /// End of a verbatim tag such as `!<tag:yaml.org,2002:str>`, whose URI
+    /// may contain flow indicators, so it ends only at its `>`.
+    fn verbatim_tag_end(&self, at: usize) -> Result<usize, YamlError> {
+        let input = self.input;
+        let uri = at + 2;
+        let close = input[uri..]
+            .iter()
+            .position(|&byte| byte == b'>' || is_blank_or_break(byte))
+            .map(|offset| uri + offset);
+        match close {
+            Some(close)
+                if close > uri && input[close] == b'>' && self.ends_flow_token(close + 1) =>
+            {
+                Ok(close + 1)
+            }
+            _ => Err(error(YamlErrorKind::UnexpectedContent, at)),
         }
     }
 
