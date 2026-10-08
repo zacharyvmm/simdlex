@@ -65,7 +65,7 @@ style), `Scalar` (raw span, style, anchor/tag), and `Alias`. An empty node,
 such as the value in `key:`, is an empty plain scalar. Scalars are borrowed
 raw spans; `decode_yaml_scalar` applies line folding, escapes, block
 indentation, and chomping into caller-owned scratch. Parsing and decoding
-allocate nothing with `Parser::with_capacity` and a warm scratch string.
+allocate nothing with `YamlParser::with_capacity` and a warm scratch string.
 
 ## Supported subset
 
