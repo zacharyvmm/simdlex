@@ -3,7 +3,7 @@
 //! Block structure is processed one line at a time. For each line, the
 //! indentation (one `run_length` over the space mask) decides which open
 //! block collections close, whether the line opens a nested node, or whether
-//! it continues the current collection. The line feed mask bounds each line,
+//! it continues the current collection. The line break mask bounds each line,
 //! and the parser reads `:`, `#`, `-`, and flow indicators in place within
 //! those bounds. Quoted scalars, which may span lines, end at the next
 //! matching quote on the tape. Flow collections use a nested state machine
@@ -14,12 +14,12 @@ use std::cell::Cell;
 use simdlex_index::MaskView;
 
 use super::{
-    LINE_FEED, SPACE, YamlBlockScalar, YamlChomping, YamlCollectionStyle, YamlError, YamlErrorKind,
-    YamlEvent, YamlProperties, YamlScalar, YamlScalarStyle, error,
+    LINE_BREAK, SPACE, YamlBlockScalar, YamlChomping, YamlCollectionStyle, YamlError,
+    YamlErrorKind, YamlEvent, YamlProperties, YamlScalar, YamlScalarStyle, error,
 };
 use crate::grammar::span;
 
-const LINE_FEED_BIT: u8 = 1 << LINE_FEED;
+const LINE_BREAK_BIT: u8 = 1 << LINE_BREAK;
 
 /// Quote offsets: a tape in [`simdlex_index::IndexMode::Hybrid`], the
 /// structural mask in [`simdlex_index::IndexMode::Masks`].
@@ -1069,21 +1069,24 @@ where
 
     // ----- lexical helpers -----
 
-    /// Offset of the line feed ending the line containing `at`, or the end
+    /// Offset of the line break ending the line containing `at`, or the end
     /// of input.
     #[inline]
     fn line_end(&self, at: usize) -> usize {
         self.masks
-            .next_in(LINE_FEED_BIT, at)
+            .next_in(LINE_BREAK_BIT, at)
             .unwrap_or(self.input.len())
     }
 
-    /// Start of the line after the one containing `at`.
+    /// Start of the line after the one containing `at`. A CRLF pair is one
+    /// line break.
     #[inline]
     fn next_line(&self, at: usize) -> usize {
-        self.masks
-            .next_in(LINE_FEED_BIT, at)
-            .map_or(self.input.len(), |feed| feed + 1)
+        match self.masks.next_in(LINE_BREAK_BIT, at) {
+            Some(cr) if self.input[cr] == b'\r' && self.input.get(cr + 1) == Some(&b'\n') => cr + 2,
+            Some(feed) => feed + 1,
+            None => self.input.len(),
+        }
     }
 
     /// After a complete node, only blanks and a comment may follow on the
