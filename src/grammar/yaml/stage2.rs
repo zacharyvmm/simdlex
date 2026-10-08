@@ -213,7 +213,7 @@ where
                     line = if self.at_line_end(after) {
                         self.next_line(after)
                     } else {
-                        self.block_line(line, after)?
+                        self.marker_line(line, after)?
                     };
                     continue;
                 }
@@ -275,6 +275,21 @@ where
     }
 
     // ----- block context -----
+
+    /// Content on a `---` line, at `at`: a scalar, alias, flow collection,
+    /// or properties. A block collection must start on a later line.
+    fn marker_line(&mut self, line: usize, at: usize) -> Result<usize, YamlError> {
+        let (properties, after) = self.properties(at, false)?;
+        if !self.at_line_end(after) {
+            if self.is_entry(after) {
+                return Err(error(YamlErrorKind::UnexpectedContent, after));
+            }
+            if let Some((_, colon)) = self.implicit_key(after, properties)? {
+                return Err(error(YamlErrorKind::UnexpectedContent, colon));
+            }
+        }
+        self.block_line(line, at)
+    }
 
     /// Process the content of one line, starting at `at`. Returns the start
     /// of the next line to process.

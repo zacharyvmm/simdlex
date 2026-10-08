@@ -650,6 +650,84 @@ fn document_markers_end_block_scalar_indentation_detection() {
 }
 
 #[test]
+fn block_collections_start_after_the_document_marker_line() {
+    for (input, offset) in [
+        ("--- key: value\n", 7),
+        ("--- - item\n", 4),
+        ("--- -\n", 4),
+        ("---\tk: v\n", 5),
+        ("--- !t k: v\n", 8),
+        ("--- &a k: v\n", 8),
+        ("--- \"k\": v\n", 7),
+        ("--- 'k' : v\n", 8),
+        ("--- &a x\n--- *a : v\n", 16),
+    ] {
+        assert!(
+            reference(input).is_none(),
+            "the reference accepts {input:?}"
+        );
+        assert_eq!(
+            render(input).unwrap_err(),
+            error(YamlErrorKind::UnexpectedContent, offset),
+            "input: {input:?}"
+        );
+    }
+    assert_events(
+        "--- !!map\nk: v\n--- &a\n- x\n--- !t &b # comment\n  - y\n",
+        "+DOC ---
+         +MAP <!!map>
+         =VAL :k
+         =VAL :v
+         -MAP
+         -DOC
+         +DOC ---
+         +SEQ &a
+         =VAL :x
+         -SEQ
+         -DOC
+         +DOC ---
+         +SEQ &b <!t>
+         =VAL :y
+         -SEQ
+         -DOC",
+    );
+    assert_events(
+        "--- k:v\n--- -x\n--- 'k'\n--- !t \"k\"\n--- &a |\n  x\n--- [a]\n--- {k: v}\n",
+        "+DOC ---
+         =VAL :k:v
+         -DOC
+         +DOC ---
+         =VAL :-x
+         -DOC
+         +DOC ---
+         =VAL 'k
+         -DOC
+         +DOC ---
+         =VAL <!t> \"k
+         -DOC
+         +DOC ---
+         =VAL &a |x\\n
+         -DOC
+         +DOC ---
+         +SEQ []
+         =VAL :a
+         -SEQ
+         -DOC
+         +DOC ---
+         +MAP {}
+         =VAL :k
+         =VAL :v
+         -MAP
+         -DOC",
+    );
+    // yaml-rust2 rejects aliases to anchors of an earlier document.
+    assert_eq!(
+        render("--- *a\n").unwrap(),
+        lines("+DOC ---\n=ALI *a\n-DOC")
+    );
+}
+
+#[test]
 fn documents_comments_and_directives() {
     assert_events(
         "# leading comment\n%YAML 1.2\n---\na: 1 # trailing\n...\n--- text\n---\n- x\n",
