@@ -8,6 +8,9 @@ use super::{
 /// backslash escapes to quoted scalars, and indentation removal, folding,
 /// and chomping to block scalars. Tags are not applied: the result is the
 /// scalar's string content.
+///
+/// Fails with [`YamlErrorKind::InvalidEscape`] on a malformed backslash
+/// escape or, in a single-quoted scalar, an apostrophe that is not doubled.
 pub fn decode_yaml_scalar<'s>(
     scalar: &YamlScalar<'_>,
     scratch: &'s mut String,
@@ -74,7 +77,12 @@ fn fold_flow(
                 }
                 keep = out.len();
             }
-            b'\'' if quoting == Quoting::Single && bytes.get(at + 1) == Some(&b'\'') => {
+            b'\'' if quoting == Quoting::Single => {
+                // Stage 2 only emits doubled quotes; a lone one comes from a
+                // caller-built scalar.
+                if bytes.get(at + 1) != Some(&b'\'') {
+                    return Err(error(YamlErrorKind::InvalidEscape, offset + at));
+                }
                 out.push('\'');
                 at += 2;
                 keep = out.len();
