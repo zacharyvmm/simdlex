@@ -394,6 +394,26 @@ fn flow_collections() {
 }
 
 #[test]
+fn json_keys_take_adjacent_values_after_separation() {
+    assert_events(
+        "{\"a\" :1, 'b'\n  :2, {c: d} :3}\n",
+        "+DOC
+         +MAP {}
+         =VAL \"a
+         =VAL :1
+         =VAL 'b
+         =VAL :2
+         +MAP {}
+         =VAL :c
+         =VAL :d
+         -MAP
+         =VAL :3
+         -MAP
+         -DOC",
+    );
+}
+
+#[test]
 fn anchors_aliases_and_tags() {
     assert_events(
         "base: &b {x: 1}\nref: *b\nseq: &s\n  - !!str 1\n  - &v !local v\nmap: !!map\n  &k key: *v\n",
@@ -686,7 +706,14 @@ fn corpus_matches_reference_parser() {
 
 #[test]
 fn unsupported_features_are_reported() {
-    for input in ["? a\n: b\n", "? \n", "[a: b]\n", "{: v}\n", ": v\n"] {
+    for input in [
+        "? a\n: b\n",
+        "? \n",
+        "[a: b]\n",
+        "[\"a\" :1]\n",
+        "{: v}\n",
+        ": v\n",
+    ] {
         assert!(
             reference(input).is_some(),
             "the reference rejects {input:?}"
