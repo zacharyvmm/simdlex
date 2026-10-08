@@ -102,10 +102,10 @@ pub(crate) struct Stage2<'a, 'm, 'f, F> {
     sink: F,
     pending: Option<Pending<'a>>,
     document_open: bool,
-    /// Offset just past the last quoted scalar or flow collection in flow
-    /// context: a `:` there is a value indicator even without a space
-    /// (`{"a":1}`).
-    adjacent_value: Option<usize>,
+    /// Whether the last completed flow node is a quoted scalar or flow
+    /// collection: a `:` after it is a value indicator even without a
+    /// following space (`{"a":1}`, `{"a" :1}`).
+    adjacent_value: bool,
 }
 
 impl<'a, 'm, 'f, F> Stage2<'a, 'm, 'f, F>
@@ -129,7 +129,7 @@ where
             sink,
             pending: None,
             document_open: false,
-            adjacent_value: None,
+            adjacent_value: false,
         }
     }
 
@@ -646,8 +646,7 @@ where
                     self.frames.pop();
                     self.emit_end(top.kind, at);
                     at += 1;
-                    self.flow_node_done();
-                    self.adjacent_value = Some(at);
+                    self.flow_node_done(true);
                 }
                 b',' => {
                     match top.flow {
@@ -662,7 +661,7 @@ where
                     at += 1;
                 }
                 b':' if top.flow == Flow::AfterEntry
-                    && (self.ends_flow_token(at + 1) || self.adjacent_value == Some(at)) =>
+                    && (self.ends_flow_token(at + 1) || self.adjacent_value) =>
                 {
                     if !is_map {
                         // `[a: b]`: a single-pair mapping.
@@ -695,7 +694,7 @@ where
         match byte {
             b',' | b']' | b'}' => {
                 self.empty_scalar(at, properties);
-                self.flow_node_done();
+                self.flow_node_done(false);
                 Ok(at)
             }
             b'[' | b'{' => {
@@ -708,7 +707,7 @@ where
                 }
                 let (alias, end) = self.alias(at)?;
                 self.emit(alias);
-                self.flow_node_done();
+                self.flow_node_done(false);
                 Ok(end)
             }
             b'"' | b'\'' => {
@@ -718,8 +717,7 @@ where
                     (self.single_quote_end(at)?, YamlScalarStyle::SingleQuoted)
                 };
                 self.scalar(at + 1, close, style, properties);
-                self.flow_node_done();
-                self.adjacent_value = Some(close + 1);
+                self.flow_node_done(true);
                 Ok(close + 1)
             }
             b'?' | b':' if self.ends_flow_token(at + 1) => {
@@ -729,7 +727,7 @@ where
             _ => {
                 let end = self.plain_flow_end(at);
                 self.scalar(at, end, YamlScalarStyle::Plain, properties);
-                self.flow_node_done();
+                self.flow_node_done(false);
                 Ok(end)
             }
         }
@@ -762,8 +760,11 @@ where
         Ok(())
     }
 
-    /// Advance the enclosing flow collection past a completed node.
-    fn flow_node_done(&mut self) {
+    /// Advance the enclosing flow collection past a completed node. `json`
+    /// marks a quoted scalar or flow collection, which a `:` may follow
+    /// directly.
+    fn flow_node_done(&mut self, json: bool) {
+        self.adjacent_value = json;
         if let Some(top) = self.frames.last_mut()
             && matches!(top.kind, Kind::FlowMap | Kind::FlowSeq)
         {
