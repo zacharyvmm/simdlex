@@ -335,14 +335,14 @@ where
                 return Err(error(YamlErrorKind::Unsupported, after));
             }
 
-            if let Some((key, colon)) = self.implicit_key(after)? {
+            if let Some((key, colon)) = self.implicit_key(after, properties)? {
                 if nested {
                     let pending = self.pending.take().unwrap();
                     self.open_block(Kind::BlockMap, col, pending.properties, at)?;
                 } else if self.top_kind() != Some(Kind::BlockMap) {
                     return Err(error(YamlErrorKind::UnexpectedContent, at));
                 }
-                self.emit(YamlEvent::Scalar(YamlScalar { properties, ..key }));
+                self.emit(key);
                 self.pending = Some(Pending {
                     parent_indent: col,
                     parent: Parent::Map,
@@ -421,14 +421,25 @@ where
         }
     }
 
-    /// If a single-line implicit key starts at `at`, returns it and the
-    /// offset of its `:`.
-    fn implicit_key(&self, at: usize) -> Result<Option<(YamlScalar<'a>, usize)>, YamlError> {
+    /// If a single-line implicit key starts at `at`, returns its event and
+    /// the offset of its `:`.
+    fn implicit_key(
+        &self,
+        at: usize,
+        properties: YamlProperties<'a>,
+    ) -> Result<Option<(YamlEvent<'a>, usize)>, YamlError> {
         let input = self.input;
         let line_end = self.line_end(at);
+        let key = |start, end, style| {
+            YamlEvent::Scalar(YamlScalar {
+                properties,
+                ..self.make_scalar(start, end, style)
+            })
+        };
         let quoted = match input[at] {
             b'"' => Some((self.double_quote_end(at), YamlScalarStyle::DoubleQuoted)),
             b'\'' => Some((self.single_quote_end(at), YamlScalarStyle::SingleQuoted)),
+            b'*' => return self.alias_key(at, properties),
             _ => None,
         };
         if let Some((close, style)) = quoted {
@@ -442,7 +453,7 @@ where
             }
             let colon = self.skip_blanks(close + 1);
             if input.get(colon) == Some(&b':') && self.ends_token(colon + 1) {
-                return Ok(Some((self.make_scalar(at + 1, close, style), colon)));
+                return Ok(Some((key(at + 1, close, style), colon)));
             }
             return Ok(None);
         }
@@ -457,13 +468,32 @@ where
                 }
             } else if self.ends_token(found + 1) {
                 let end = self.trim_end(at, found);
-                return Ok(Some((
-                    self.make_scalar(at, end, YamlScalarStyle::Plain),
-                    found,
-                )));
+                return Ok(Some((key(at, end, YamlScalarStyle::Plain), found)));
             }
         }
         Ok(None)
+    }
+
+    /// An alias used as an implicit key: `*a : b`. Anchor names may contain
+    /// `:`, so the indicator must be separated from the name.
+    fn alias_key(
+        &self,
+        at: usize,
+        properties: YamlProperties<'a>,
+    ) -> Result<Option<(YamlEvent<'a>, usize)>, YamlError> {
+        let end = self.token_end(at + 1);
+        let colon = self.skip_blanks(end);
+        if self.input.get(colon) != Some(&b':') || !self.ends_token(colon + 1) {
+            return Ok(None);
+        }
+        if !properties.is_empty() {
+            return Err(error(YamlErrorKind::UnexpectedContent, at));
+        }
+        let alias = YamlEvent::Alias {
+            name: &self.input[at + 1..end],
+            span: span(at + 1, end),
+        };
+        Ok(Some((alias, colon)))
     }
 
     /// A plain scalar in block context, possibly continued on more-indented

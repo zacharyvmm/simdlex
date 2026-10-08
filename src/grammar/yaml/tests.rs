@@ -467,6 +467,33 @@ fn flow_properties_span_lines() {
 }
 
 #[test]
+fn aliases_as_block_mapping_keys() {
+    assert_events(
+        "&a foo: 1\n*a : 2\nseq:\n- *a : 3\n",
+        "+DOC
+         +MAP
+         =VAL &a :foo
+         =VAL :1
+         =ALI *a
+         =VAL :2
+         =VAL :seq
+         +SEQ
+         +MAP
+         =ALI *a
+         =VAL :3
+         -MAP
+         -SEQ
+         -MAP
+         -DOC",
+    );
+    let kind = |input: &str| render(input).unwrap_err();
+    assert_eq!(
+        kind("a: 1\n&b *a : 2"),
+        error(YamlErrorKind::UnexpectedContent, 8)
+    );
+}
+
+#[test]
 fn documents_comments_and_directives() {
     assert_events(
         "# leading comment\n%YAML 1.2\n---\na: 1 # trailing\n...\n--- text\n---\n- x\n",
