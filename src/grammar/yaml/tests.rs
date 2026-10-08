@@ -494,6 +494,15 @@ fn aliases_as_block_mapping_keys() {
 }
 
 #[test]
+fn aliases_need_a_name() {
+    let kind = |input: &str| render(input).unwrap_err();
+    assert_eq!(kind("*"), error(YamlErrorKind::UnexpectedContent, 0));
+    assert_eq!(kind("key: *"), error(YamlErrorKind::UnexpectedContent, 5));
+    assert_eq!(kind("[*]"), error(YamlErrorKind::UnexpectedContent, 1));
+    assert_eq!(kind("* : a"), error(YamlErrorKind::UnexpectedContent, 0));
+}
+
+#[test]
 fn documents_comments_and_directives() {
     assert_events(
         "# leading comment\n%YAML 1.2\n---\na: 1 # trailing\n...\n--- text\n---\n- x\n",

@@ -392,11 +392,8 @@ where
                 if !properties.is_empty() {
                     return Err(error(YamlErrorKind::UnexpectedContent, at));
                 }
-                let end = self.token_end(at + 1);
-                self.emit(YamlEvent::Alias {
-                    name: &input[at + 1..end],
-                    span: span(at + 1, end),
-                });
+                let (alias, end) = self.alias(at)?;
+                self.emit(alias);
                 self.end_of_line(end)
             }
             b'"' => {
@@ -481,7 +478,7 @@ where
         at: usize,
         properties: YamlProperties<'a>,
     ) -> Result<Option<(YamlEvent<'a>, usize)>, YamlError> {
-        let end = self.token_end(at + 1);
+        let (alias, end) = self.alias(at)?;
         let colon = self.skip_blanks(end);
         if self.input.get(colon) != Some(&b':') || !self.ends_token(colon + 1) {
             return Ok(None);
@@ -489,11 +486,20 @@ where
         if !properties.is_empty() {
             return Err(error(YamlErrorKind::UnexpectedContent, at));
         }
+        Ok(Some((alias, colon)))
+    }
+
+    /// The alias `*name` at `at`, and the offset after it.
+    fn alias(&self, at: usize) -> Result<(YamlEvent<'a>, usize), YamlError> {
+        let end = self.token_end(at + 1);
+        if end == at + 1 {
+            return Err(error(YamlErrorKind::UnexpectedContent, at));
+        }
         let alias = YamlEvent::Alias {
             name: &self.input[at + 1..end],
             span: span(at + 1, end),
         };
-        Ok(Some((alias, colon)))
+        Ok((alias, end))
     }
 
     /// A plain scalar in block context, possibly continued on more-indented
@@ -752,11 +758,8 @@ where
                 if !properties.is_empty() {
                     return Err(error(YamlErrorKind::UnexpectedContent, at));
                 }
-                let end = self.token_end(at + 1);
-                self.emit(YamlEvent::Alias {
-                    name: &input[at + 1..end],
-                    span: span(at + 1, end),
-                });
+                let (alias, end) = self.alias(at)?;
+                self.emit(alias);
                 self.flow_node_done();
                 Ok(end)
             }
