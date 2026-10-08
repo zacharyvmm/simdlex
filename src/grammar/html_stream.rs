@@ -114,11 +114,15 @@ impl<'a> HtmlStartElement<'a> {
 
 impl PartialEq for HtmlStartElement<'_> {
     fn eq(&self, other: &Self) -> bool {
+        // Attributes parse deterministically from their bytes and offsets.
+        let attributes = |element: &Self| {
+            &element.input[element.attributes_start as usize..element.attributes_end as usize]
+        };
         self.name == other.name
             && self.span == other.span
             && self.self_closing == other.self_closing
             && self.attributes_start == other.attributes_start
-            && self.attributes_end == other.attributes_end
+            && attributes(self) == attributes(other)
     }
 }
 
@@ -797,6 +801,17 @@ mod tests {
             panic!("expected p");
         };
         assert_eq!(p.attribute(b"class").unwrap().value.unwrap().raw, b"A");
+    }
+
+    #[test]
+    fn start_elements_compare_attribute_values() {
+        let first = |input: &'static [u8]| {
+            HtmlReader::from_positions(input, 0..input.len() as u32)
+                .next()
+                .unwrap()
+        };
+        assert_eq!(first(b"<a x='1'>"), first(b"<a x='1'>"));
+        assert_ne!(first(b"<a x='1'>"), first(b"<a x='2'>"));
     }
 
     #[test]
