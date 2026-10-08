@@ -140,6 +140,8 @@ where
         } else {
             0
         };
+        // Directives must be followed by a `---` document start.
+        let mut directives = false;
 
         while line < len {
             let indent = self.masks.run_length(SPACE, line);
@@ -152,22 +154,27 @@ where
 
             if line == content {
                 if self.is_document_marker(line, b'-') {
+                    directives = false;
                     self.start_document(line, true)?;
                     let after = self.skip_blanks(line + 3);
                     line = if self.at_line_end(after) {
                         self.next_line(after)
                     } else {
-                        self.block_line(line, after)?
+                        self.marker_line(line, after)?
                     };
                     continue;
                 }
                 if self.is_document_marker(line, b'.') {
+                    if directives {
+                        return Err(error(YamlErrorKind::UnexpectedContent, line));
+                    }
                     self.end_document(line, true);
                     line = self.end_of_line(line + 3)?;
                     continue;
                 }
                 if self.input[line] == b'%' && !self.document_open {
                     // Directives are skipped; tag handles are not resolved.
+                    directives = true;
                     line = self.next_line(line);
                     continue;
                 }
@@ -177,11 +184,17 @@ where
                 return Err(error(YamlErrorKind::TabIndentation, content));
             }
             if !self.document_open {
+                if directives {
+                    return Err(error(YamlErrorKind::UnexpectedContent, content));
+                }
                 self.start_document(content, false)?;
             }
             line = self.block_line(line, content)?;
         }
 
+        if directives {
+            return Err(error(YamlErrorKind::UnexpectedContent, len));
+        }
         self.end_document(len, false);
         Ok(())
     }
@@ -219,6 +232,21 @@ where
     }
 
     // ----- block context -----
+
+    /// Content on a `---` line, at `at`: a scalar, alias, flow collection,
+    /// or properties. A block collection must start on a later line.
+    fn marker_line(&mut self, line: usize, at: usize) -> Result<usize, YamlError> {
+        let (properties, after) = self.properties(at, false)?;
+        if !self.at_line_end(after) {
+            if self.is_entry(after) {
+                return Err(error(YamlErrorKind::UnexpectedContent, after));
+            }
+            if let Some((_, colon)) = self.implicit_key(after, properties)? {
+                return Err(error(YamlErrorKind::UnexpectedContent, colon));
+            }
+        }
+        self.block_line(line, at)
+    }
 
     /// Process the content of one line, starting at `at`. Returns the start
     /// of the next line to process.
@@ -471,8 +499,7 @@ where
             }
             if indent as i64 <= parent_indent
                 || self.input[first] == b'#'
-                || (indent == 0
-                    && (self.is_document_marker(line, b'-') || self.is_document_marker(line, b'.')))
+                || (indent == 0 && self.is_document_boundary(line))
             {
                 break;
             }
@@ -556,7 +583,9 @@ where
                     let spaces = self.masks.run_length(SPACE, line);
                     let first = line + spaces;
                     if first < len && !is_break(input[first]) {
-                        first_content = Some((spaces as i64, line));
+                        if spaces > 0 || !self.is_document_boundary(line) {
+                            first_content = Some((spaces as i64, line));
+                        }
                         break;
                     }
                     longest_empty = longest_empty.max(spaces as i64);
@@ -581,10 +610,7 @@ where
             let first = line + spaces;
             let blank = first >= len || is_break(input[first]);
             if !blank
-                && ((spaces as i64) < indent
-                    || (spaces == 0
-                        && (self.is_document_marker(line, b'-')
-                            || self.is_document_marker(line, b'.'))))
+                && ((spaces as i64) < indent || (spaces == 0 && self.is_document_boundary(line)))
             {
                 break;
             }
@@ -1111,12 +1137,18 @@ where
     fn breaks_before(&self, mut feed: usize, to: usize) -> Option<usize> {
         while feed < to {
             let line = feed + 1;
-            if self.is_document_marker(line, b'-') || self.is_document_marker(line, b'.') {
+            if self.is_document_boundary(line) {
                 return None;
             }
             feed = self.line_end(line);
         }
         Some(feed)
+    }
+
+    /// Whether `line` starts with a `---` or `...` marker.
+    #[inline]
+    fn is_document_boundary(&self, line: usize) -> bool {
+        self.is_document_marker(line, b'-') || self.is_document_marker(line, b'.')
     }
 
     #[inline]
