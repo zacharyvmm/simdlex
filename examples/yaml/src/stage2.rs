@@ -3,7 +3,7 @@
 //! Block structure is processed one line at a time. For each line, the
 //! indentation (one `run_length` over the space mask) decides which open
 //! block collections close, whether the line opens a nested node, or whether
-//! it continues the current collection. The line feed mask bounds each line,
+//! it continues the current collection. The line break mask bounds each line,
 //! and the parser reads `:`, `#`, `-`, and flow indicators in place within
 //! those bounds. Quoted scalars, which may span lines, end at the next
 //! matching quote on the tape. Flow collections use a nested state machine
@@ -14,12 +14,12 @@ use std::cell::Cell;
 use simdlex::{MaskView, TapeCursor};
 
 use super::{
-    LINE_FEED, SPACE, YamlBlockScalar, YamlChomping, YamlCollectionStyle, YamlError, YamlErrorKind,
-    YamlEvent, YamlProperties, YamlScalar, YamlScalarStyle, error,
+    LINE_BREAK, SPACE, YamlBlockScalar, YamlChomping, YamlCollectionStyle, YamlError,
+    YamlErrorKind, YamlEvent, YamlProperties, YamlScalar, YamlScalarStyle, error,
 };
 use crate::span;
 
-const LINE_FEED_BIT: u8 = 1 << LINE_FEED;
+const LINE_BREAK_BIT: u8 = 1 << LINE_BREAK;
 
 /// Quote offsets on the tape. Stage 2 searches from `&self` methods, so the
 /// cursor lives in a [`Cell`].
@@ -336,11 +336,8 @@ where
                 if !properties.is_empty() {
                     return Err(error(YamlErrorKind::UnexpectedContent, at));
                 }
-                let end = self.token_end(at + 1);
-                self.emit(YamlEvent::Alias {
-                    name: &input[at + 1..end],
-                    span: span(at + 1, end),
-                });
+                let (alias, end) = self.alias(at)?;
+                self.emit(alias);
                 self.end_of_line(end)
             }
             b'"' => {
@@ -425,7 +422,7 @@ where
         at: usize,
         properties: YamlProperties<'a>,
     ) -> Result<Option<(YamlEvent<'a>, usize)>, YamlError> {
-        let end = self.token_end(at + 1);
+        let (alias, end) = self.alias(at)?;
         let colon = self.skip_blanks(end);
         if self.input.get(colon) != Some(&b':') || !self.ends_token(colon + 1) {
             return Ok(None);
@@ -433,11 +430,20 @@ where
         if !properties.is_empty() {
             return Err(error(YamlErrorKind::UnexpectedContent, at));
         }
+        Ok(Some((alias, colon)))
+    }
+
+    /// The alias `*name` at `at`, and the offset after it.
+    fn alias(&self, at: usize) -> Result<(YamlEvent<'a>, usize), YamlError> {
+        let end = self.token_end(at + 1);
+        if end == at + 1 {
+            return Err(error(YamlErrorKind::UnexpectedContent, at));
+        }
         let alias = YamlEvent::Alias {
             name: &self.input[at + 1..end],
             span: span(at + 1, end),
         };
-        Ok(Some((alias, colon)))
+        Ok((alias, end))
     }
 
     /// A plain scalar in block context, possibly continued on more-indented
@@ -612,9 +618,13 @@ where
         let base = self.frames.len();
         self.open_flow(open, properties)?;
         let mut at = open + 1;
+        let mut next_break = self.line_end(at);
 
         while self.frames.len() > base {
             at = self.skip_flow_space(at);
+            next_break = self
+                .breaks_before(next_break, at)
+                .ok_or_else(|| error(YamlErrorKind::UnterminatedFlow, open))?;
             let Some(&byte) = input.get(at) else {
                 return Err(error(YamlErrorKind::UnterminatedFlow, open));
             };
@@ -696,11 +706,8 @@ where
                 if !properties.is_empty() {
                     return Err(error(YamlErrorKind::UnexpectedContent, at));
                 }
-                let end = self.token_end(at + 1);
-                self.emit(YamlEvent::Alias {
-                    name: &input[at + 1..end],
-                    span: span(at + 1, end),
-                });
+                let (alias, end) = self.alias(at)?;
+                self.emit(alias);
                 self.flow_node_done();
                 Ok(end)
             }
@@ -800,7 +807,7 @@ where
                 start -= 1;
             }
             if (quote - start) % 2 == 0 {
-                return Ok(quote);
+                return self.quote_in_document(open, quote);
             }
             from = quote + 1;
         }
@@ -819,7 +826,15 @@ where
                 from = quote + 2;
                 continue;
             }
-            return Ok(quote);
+            return self.quote_in_document(open, quote);
+        }
+    }
+
+    /// `close`, unless a document marker line lies between the quotes.
+    fn quote_in_document(&self, open: usize, close: usize) -> Result<usize, YamlError> {
+        match self.breaks_before(self.line_end(open), close) {
+            Some(_) => Ok(close),
+            None => Err(error(YamlErrorKind::UnterminatedQuote, open)),
         }
     }
 
@@ -998,21 +1013,24 @@ where
 
     // ----- lexical helpers -----
 
-    /// Offset of the line feed ending the line containing `at`, or the end
+    /// Offset of the line break ending the line containing `at`, or the end
     /// of input.
     #[inline]
     fn line_end(&self, at: usize) -> usize {
         self.masks
-            .next_in(LINE_FEED_BIT, at)
+            .next_in(LINE_BREAK_BIT, at)
             .unwrap_or(self.input.len())
     }
 
-    /// Start of the line after the one containing `at`.
+    /// Start of the line after the one containing `at`. A CRLF pair is one
+    /// line break.
     #[inline]
     fn next_line(&self, at: usize) -> usize {
-        self.masks
-            .next_in(LINE_FEED_BIT, at)
-            .map_or(self.input.len(), |feed| feed + 1)
+        match self.masks.next_in(LINE_BREAK_BIT, at) {
+            Some(cr) if self.input[cr] == b'\r' && self.input.get(cr + 1) == Some(&b'\n') => cr + 2,
+            Some(feed) => feed + 1,
+            None => self.input.len(),
+        }
     }
 
     /// After a complete node, only blanks and a comment may follow on the
@@ -1083,6 +1101,21 @@ where
     #[inline]
     fn is_entry(&self, at: usize) -> bool {
         self.input[at] == b'-' && self.ends_token(at + 1)
+    }
+
+    /// Skip the lines that start before `to`, from the line break at `feed`.
+    /// Returns the first line break at or after `to`, or `None` if one of
+    /// those lines is a `---` or `...` marker, which no scalar or flow
+    /// collection may cross.
+    fn breaks_before(&self, mut feed: usize, to: usize) -> Option<usize> {
+        while feed < to {
+            let line = feed + 1;
+            if self.is_document_marker(line, b'-') || self.is_document_marker(line, b'.') {
+                return None;
+            }
+            feed = self.line_end(line);
+        }
+        Some(feed)
     }
 
     #[inline]

@@ -10,13 +10,13 @@ the index records only the bounds stage 2 must search for:
 
 | Class | Bound | Stored as |
 |---|---|---|
-| `\n` | end of every line | mask |
+| `\n` `\r` | end of every line | mask |
 | space | indentation (`MaskView::run_length`) | mask |
 | `'` `"` | end of a quoted scalar, which may span many lines | tape |
 
 Everything else is read in place. `:`, `#`, `-` and `[ ] { } ,` all lie
 inside a line that stage 2 is already walking between known bounds. Line
-feeds and spaces are dense (spaces alone are 19–40% of the bytes in the
+breaks and spaces are dense (spaces alone are 19–40% of the bytes in the
 files below), so they are masks. Quotes are 0.1–0.6% of the bytes, so they
 go on the tape (`YamlSpec` sets `MASK_CLASSES = 2`). It uses three
 generated table bits. Quote context is not resolved in stage 1: an
@@ -77,7 +77,8 @@ allocate nothing with `YamlParser::with_capacity` and a warm scratch string.
 - Flow sequences and mappings, nested and multi-line, including JSON-style
   `{"a":1}`.
 - Anchors, aliases, and tags (as written); comments; `---`/`...` and
-  multiple documents; directives (skipped); a leading byte-order mark; CRLF.
+  multiple documents; directives (skipped); a leading byte-order mark; CRLF
+  and lone CR line breaks.
 
 Reported as `YamlErrorKind::Unsupported`: explicit keys (`? k`), empty keys
 (`: v`), and single-pair mappings in flow sequences (`[a: b]`). Complex keys

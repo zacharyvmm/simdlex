@@ -494,6 +494,83 @@ fn aliases_as_block_mapping_keys() {
 }
 
 #[test]
+fn aliases_need_a_name() {
+    let kind = |input: &str| render(input).unwrap_err();
+    assert_eq!(kind("*"), error(YamlErrorKind::UnexpectedContent, 0));
+    assert_eq!(kind("key: *"), error(YamlErrorKind::UnexpectedContent, 5));
+    assert_eq!(kind("[*]"), error(YamlErrorKind::UnexpectedContent, 1));
+    assert_eq!(kind("* : a"), error(YamlErrorKind::UnexpectedContent, 0));
+}
+
+#[test]
+fn lone_carriage_returns_break_lines() {
+    assert_events(
+        "---\ra: b\r",
+        "+DOC ---
+         +MAP
+         =VAL :a
+         =VAL :b
+         -MAP
+         -DOC",
+    );
+    assert_events(
+        "a: # comment\r  b\rc: |\r  x\r\r  y\rd: plain\r  text\r\ne: [1,\r  2]\r",
+        "+DOC
+         +MAP
+         =VAL :a
+         =VAL :b
+         =VAL :c
+         =VAL |x\\n\\ny\\n
+         =VAL :d
+         =VAL :plain text
+         =VAL :e
+         +SEQ []
+         =VAL :1
+         =VAL :2
+         -SEQ
+         -MAP
+         -DOC",
+    );
+}
+
+#[test]
+fn document_markers_end_multi_line_scalars() {
+    let kind = |input: &str| render(input).unwrap_err();
+    assert_eq!(
+        kind("\"hello\n---\nworld\""),
+        error(YamlErrorKind::UnterminatedQuote, 0)
+    );
+    assert_eq!(
+        kind("a: 'hello\n...\nworld'"),
+        error(YamlErrorKind::UnterminatedQuote, 3)
+    );
+    assert_eq!(
+        kind("[a\n---\nb]"),
+        error(YamlErrorKind::UnterminatedFlow, 0)
+    );
+    assert_eq!(
+        kind("a: {b: c,\n...\n}"),
+        error(YamlErrorKind::UnterminatedFlow, 3)
+    );
+    // Markers need a following blank or break, and only start a line.
+    assert_events(
+        "\"a\n ---\n---b\"\n",
+        "+DOC
+         =VAL \"a --- ---b
+         -DOC",
+    );
+    assert_events(
+        "[a,\n---b]\n",
+        "+DOC
+         +SEQ []
+         =VAL :a
+         =VAL :---b
+         -SEQ
+         -DOC",
+    );
+}
+
+#[test]
 fn documents_comments_and_directives() {
     assert_events(
         "# leading comment\n%YAML 1.2\n---\na: 1 # trailing\n...\n--- text\n---\n- x\n",
@@ -597,6 +674,7 @@ const CORPUS: &[&str] = &[
     "unicode: é雪 ✓\n",
     "tabs:\t[a,\tb]\n",
     "win: dows\r\nline: ends\r\n",
+    "crlf: |\r\n  a\r\n\r\n  b\r\nc: >\r\n  d\r\n  e\r\n",
 ];
 
 #[test]
@@ -955,7 +1033,7 @@ fn every_backend_and_alignment_agrees() {
 
 #[test]
 fn table_is_exact_for_named_sets() {
-    let members: [&[u8]; 3] = [b"\n", b" ", b"'\""];
+    let members: [&[u8]; 3] = [b"\n\r", b" ", b"'\""];
     for byte in u8::MIN..=u8::MAX {
         let class = YamlSpec::TABLES.classify(byte);
         for (index, set) in members.iter().enumerate() {
@@ -1024,9 +1102,9 @@ fn equivalent(ours: &[String], reference: &[String]) -> bool {
 #[test]
 fn random_inputs_match_reference_parser() {
     const ALPHABETS: [&[u8]; 3] = [
-        b"ab -:#&*!|>'\"\\[]{},\n\n  \t",
-        b"ab:-\n\n    \n  '\"[]{},#&*!|>?%",
-        b"k: \n- \n  \n    ab|>-+2'\"",
+        b"ab -:#&*!|>'\"\\[]{},\n\n  \t\r",
+        b"ab:-\n\n    \n  '\"[]{},#&*!|>?%\r",
+        b"k: \n- \n  \n    ab|>-+2'\"\r",
     ];
     let mut rng = Rng(0x1234_5678_9abc_def1);
     let rounds = std::env::var("SIMDLEX_YAML_ROUNDS")

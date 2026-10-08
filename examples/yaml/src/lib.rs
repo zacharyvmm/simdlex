@@ -1,12 +1,12 @@
 //! A YAML event stream: a hybrid-index stage 1 and a streaming stage 2.
 //!
 //! The index only records the bounds stage 2 has to search for. In YAML
-//! those are line feeds and spaces, which bound every line and its
+//! those are line breaks and spaces, which bound every line and its
 //! indentation, and quotes, which bound scalars that may span many lines.
 //! Everything else (`:`, `#`, `-`, flow indicators) lies inside a line that
 //! stage 2 is already walking, so it is read in place rather than indexed.
 //!
-//! Line feeds and spaces are dense, so they stay per-block masks; quotes are
+//! Line breaks and spaces are dense, so they stay per-block masks; quotes are
 //! sparse, so they go to the tape. Stage 2 measures
 //! indentation with [`simdlex_index::MaskView::run_length`], finds line ends
 //! with [`simdlex_index::MaskView::next_in`], and jumps along the tape to
@@ -47,16 +47,19 @@ pub use decode::decode_yaml_scalar;
 
 /// Class indices. Layout classes come first: they keep their masks in
 /// hybrid mode.
-pub(crate) const LINE_FEED: usize = 0;
+///
+/// Line breaks are `\n` and `\r`, so a lone `\r` ends a line too. Stage 2
+/// steps over a CRLF pair as one break.
+pub(crate) const LINE_BREAK: usize = 0;
 pub(crate) const SPACE: usize = 1;
 /// Quotes, recorded on the tape in hybrid mode. A quoted scalar can span
 /// many lines, so stage 2 jumps to its closing quote through the index.
 /// Everything else (`:`, `#`, `-`, flow indicators) is found by scanning
-/// the current line, which the line-feed mask already bounds.
+/// the current line, which the line-break mask already bounds.
 pub(crate) const QUOTES: usize = 2;
 
 const CLASSES: [ByteSet; 3] = [
-    ByteSet::from_bytes(b"\n"),
+    ByteSet::from_bytes(b"\n\r"),
     ByteSet::from_bytes(b" "),
     ByteSet::from_bytes(b"'\""),
 ];
@@ -217,7 +220,7 @@ pub(crate) fn error(kind: YamlErrorKind, offset: usize) -> YamlError {
     }
 }
 
-/// The YAML structural index: line feeds and spaces as masks, quotes on the
+/// The YAML structural index: line breaks and spaces as masks, quotes on the
 /// tape.
 #[derive(Debug, Clone, Copy)]
 pub struct YamlSpec;
@@ -232,7 +235,7 @@ impl IndexSpec for YamlSpec {
     };
     const CLASS_BITS: [u8; 8] = GENERATED.padded_class_bits();
     const CLASS_COUNT: usize = CLASSES.len();
-    // Spaces and line feeds are dense, so they stay masks. Quotes are the
+    // Spaces and line breaks are dense, so they stay masks. Quotes are the
     // sparse remainder and become the tape (the default `scan_block`).
     // Quote context cannot be resolved here: a `'` inside a plain scalar
     // (`don't`) is ordinary text, so prefix-XOR parity would be wrong.

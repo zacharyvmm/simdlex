@@ -177,17 +177,17 @@ fn escape(raw: &str, at: usize, offset: usize, out: &mut String) -> Result<usize
 /// Block scalar content: strip indentation, fold (for `>`), and chomp.
 fn block(raw: &str, header: YamlBlockScalar, folded: bool, out: &mut String) {
     let indent = header.indent as usize;
-    let ends_with_break = raw.ends_with('\n');
     let body = raw.strip_suffix('\n').unwrap_or(raw);
-    // Lines with indentation removed. Stage 2 guarantees that non-empty lines
-    // carry at least `indent` spaces, so shorter lines are empty.
+    let body = body.strip_suffix('\r').unwrap_or(body);
+    let ends_with_break = body.len() < raw.len();
+    // Lines with indentation removed, split at CRLF, LF, or a lone CR. Stage
+    // 2 guarantees that non-empty lines carry at least `indent` spaces, so
+    // shorter lines are empty.
     let lines = || {
         body.split('\n')
+            .flat_map(|line| line.strip_suffix('\r').unwrap_or(line).split('\r'))
             .take(if raw.is_empty() { 0 } else { usize::MAX })
-            .map(|line| {
-                let line = line.strip_suffix('\r').unwrap_or(line);
-                line.get(indent..).unwrap_or("")
-            })
+            .map(|line| line.get(indent..).unwrap_or(""))
     };
     let line_count = lines().count();
     let last_content = lines()
