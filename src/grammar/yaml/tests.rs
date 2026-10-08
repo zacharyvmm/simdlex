@@ -503,6 +503,43 @@ fn aliases_need_a_name() {
 }
 
 #[test]
+fn document_markers_end_multi_line_scalars() {
+    let kind = |input: &str| render(input).unwrap_err();
+    assert_eq!(
+        kind("\"hello\n---\nworld\""),
+        error(YamlErrorKind::UnterminatedQuote, 0)
+    );
+    assert_eq!(
+        kind("a: 'hello\n...\nworld'"),
+        error(YamlErrorKind::UnterminatedQuote, 3)
+    );
+    assert_eq!(
+        kind("[a\n---\nb]"),
+        error(YamlErrorKind::UnterminatedFlow, 0)
+    );
+    assert_eq!(
+        kind("a: {b: c,\n...\n}"),
+        error(YamlErrorKind::UnterminatedFlow, 3)
+    );
+    // Markers need a following blank or break, and only start a line.
+    assert_events(
+        "\"a\n ---\n---b\"\n",
+        "+DOC
+         =VAL \"a --- ---b
+         -DOC",
+    );
+    assert_events(
+        "[a,\n---b]\n",
+        "+DOC
+         +SEQ []
+         =VAL :a
+         =VAL :---b
+         -SEQ
+         -DOC",
+    );
+}
+
+#[test]
 fn documents_comments_and_directives() {
     assert_events(
         "# leading comment\n%YAML 1.2\n---\na: 1 # trailing\n...\n--- text\n---\n- x\n",

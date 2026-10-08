@@ -674,9 +674,13 @@ where
         let base = self.frames.len();
         self.open_flow(open, properties)?;
         let mut at = open + 1;
+        let mut next_break = self.line_end(at);
 
         while self.frames.len() > base {
             at = self.skip_flow_space(at);
+            next_break = self
+                .breaks_before(next_break, at)
+                .ok_or_else(|| error(YamlErrorKind::UnterminatedFlow, open))?;
             let Some(&byte) = input.get(at) else {
                 return Err(error(YamlErrorKind::UnterminatedFlow, open));
             };
@@ -859,7 +863,7 @@ where
                 start -= 1;
             }
             if (quote - start) % 2 == 0 {
-                return Ok(quote);
+                return self.quote_in_document(open, quote);
             }
             from = quote + 1;
         }
@@ -878,7 +882,15 @@ where
                 from = quote + 2;
                 continue;
             }
-            return Ok(quote);
+            return self.quote_in_document(open, quote);
+        }
+    }
+
+    /// `close`, unless a document marker line lies between the quotes.
+    fn quote_in_document(&self, open: usize, close: usize) -> Result<usize, YamlError> {
+        match self.breaks_before(self.line_end(open), close) {
+            Some(_) => Ok(close),
+            None => Err(error(YamlErrorKind::UnterminatedQuote, open)),
         }
     }
 
@@ -1142,6 +1154,21 @@ where
     #[inline]
     fn is_entry(&self, at: usize) -> bool {
         self.input[at] == b'-' && self.ends_token(at + 1)
+    }
+
+    /// Skip the lines that start before `to`, from the line break at `feed`.
+    /// Returns the first line break at or after `to`, or `None` if one of
+    /// those lines is a `---` or `...` marker, which no scalar or flow
+    /// collection may cross.
+    fn breaks_before(&self, mut feed: usize, to: usize) -> Option<usize> {
+        while feed < to {
+            let line = feed + 1;
+            if self.is_document_marker(line, b'-') || self.is_document_marker(line, b'.') {
+                return None;
+            }
+            feed = self.line_end(line);
+        }
+        Some(feed)
     }
 
     #[inline]
