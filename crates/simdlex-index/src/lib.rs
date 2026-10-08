@@ -428,6 +428,62 @@ mod tests {
         }
     }
 
+    /// [`Demo`] with no class masks kept in hybrid mode.
+    struct TapeOnlyHybrid;
+
+    impl IndexSpec for TapeOnlyHybrid {
+        type State = ();
+        type Error = ();
+
+        const TABLES: NibbleTables = Demo::TABLES;
+        const CLASS_BITS: [u8; 8] = Demo::CLASS_BITS;
+        const CLASS_COUNT: usize = Demo::CLASS_COUNT;
+        const EXACT_BYTES: [u8; 4] = Demo::EXACT_BYTES;
+        const EXACT_COUNT: usize = Demo::EXACT_COUNT;
+        const UTF8_POLICY: Utf8Policy = Demo::UTF8_POLICY;
+        const MODE: IndexMode = IndexMode::Hybrid;
+        const HYBRID_MASK_CLASSES: usize = 0;
+
+        fn scan_block(
+            input: &[u8; 64],
+            base: u32,
+            valid: u64,
+            masks: &mut ClassifiedBlock,
+            state: &mut (),
+        ) -> Result<u64, ()> {
+            Demo::scan_block(input, base, valid, masks, state)
+        }
+
+        fn finish(input_len: u32, state: &mut ()) -> Result<(), ()> {
+            Demo::finish(input_len, state)
+        }
+
+        fn utf8_error(offset: u32) {
+            Demo::utf8_error(offset)
+        }
+    }
+
+    #[test]
+    fn hybrid_masks_without_classes_still_count_blocks() {
+        let indexer = Indexer::<TapeOnlyHybrid>::new();
+        let mut index = StructuralIndex::new();
+        for len in [0, 1, 64, 65, 200] {
+            let input = b"<a=b> ".repeat(40);
+            let input = &input[..len];
+            indexer
+                .index(input, IndexMode::Hybrid, &mut (), &mut index)
+                .unwrap();
+            let masks = index.view().masks().unwrap();
+            assert_eq!(masks.layout().stride(), 0);
+            assert_eq!(masks.blocks(), len.div_ceil(64));
+            assert_eq!(masks.next_in(0b111, 0), None);
+            assert_eq!(
+                index.view().bytes(),
+                size_of_val(index.view().tape().unwrap())
+            );
+        }
+    }
+
     #[test]
     fn reserved_index_is_reused() {
         let indexer = Indexer::<Demo>::new();

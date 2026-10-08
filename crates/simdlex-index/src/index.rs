@@ -219,9 +219,14 @@ pub struct MaskView<'a> {
 }
 
 impl<'a> MaskView<'a> {
+    /// The number of 64-byte blocks scanned. A hybrid layout may keep no
+    /// classes, leaving every block's group of masks empty.
     #[inline]
     pub fn blocks(self) -> usize {
-        self.masks.len() / self.layout.stride()
+        self.masks
+            .len()
+            .checked_div(self.layout.stride())
+            .unwrap_or_else(|| (self.input_len as usize).div_ceil(64))
     }
 
     #[inline]
