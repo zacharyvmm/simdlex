@@ -445,6 +445,28 @@ fn verbatim_tags_end_at_their_closing_bracket() {
 }
 
 #[test]
+fn flow_properties_span_lines() {
+    assert_events(
+        "[&a\n  !foo value, &b # comment\n  !bar\n]\n",
+        "+DOC
+         +SEQ []
+         =VAL &a <!foo> :value
+         =VAL &b <!bar> :
+         -SEQ
+         -DOC",
+    );
+    assert_events(
+        "{k: !foo\n  &a v}\n",
+        "+DOC
+         +MAP {}
+         =VAL :k
+         =VAL &a <!foo> :v
+         -MAP
+         -DOC",
+    );
+}
+
+#[test]
 fn documents_comments_and_directives() {
     assert_events(
         "# leading comment\n%YAML 1.2\n---\na: 1 # trailing\n...\n--- text\n---\n- x\n",

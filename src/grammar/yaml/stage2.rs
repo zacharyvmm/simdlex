@@ -321,7 +321,7 @@ where
                 continue;
             }
 
-            let (properties, after) = self.properties(at)?;
+            let (properties, after) = self.properties(at, false)?;
             if !properties.is_empty() && self.at_line_end(after) {
                 // Properties of a node that starts on a later line.
                 if !nested {
@@ -349,7 +349,7 @@ where
                     properties: YamlProperties::default(),
                 });
                 let value = self.skip_blanks(colon + 1);
-                let (properties, value) = self.properties(value)?;
+                let (properties, value) = self.properties(value, false)?;
                 self.pending.as_mut().unwrap().properties = properties;
                 if self.at_line_end(value) {
                     return Ok(self.next_line(value));
@@ -704,8 +704,7 @@ where
     /// One node inside a flow collection. Returns the offset after it.
     fn flow_node(&mut self, at: usize) -> Result<usize, YamlError> {
         let input = self.input;
-        let (properties, after) = self.properties(at)?;
-        let at = self.skip_flow_space(after);
+        let (properties, at) = self.properties(at, true)?;
         let Some(&byte) = input.get(at) else {
             return Err(error(YamlErrorKind::UnterminatedFlow, at));
         };
@@ -850,9 +849,21 @@ where
         }
     }
 
-    /// Optional `&anchor` and `!tag`, in either order.
-    fn properties(&self, mut at: usize) -> Result<(YamlProperties<'a>, usize), YamlError> {
+    /// Optional `&anchor` and `!tag`, in either order. In flow context they
+    /// may be separated by line breaks and comments.
+    fn properties(
+        &self,
+        mut at: usize,
+        flow: bool,
+    ) -> Result<(YamlProperties<'a>, usize), YamlError> {
         let input = self.input;
+        let separate = |at| {
+            if flow {
+                self.skip_flow_space(at)
+            } else {
+                self.skip_blanks(at)
+            }
+        };
         let mut properties = YamlProperties::default();
         loop {
             match input.get(at) {
@@ -862,7 +873,7 @@ where
                         return Err(error(YamlErrorKind::UnexpectedContent, at));
                     }
                     properties.anchor = Some(&input[at + 1..end]);
-                    at = self.skip_blanks(end);
+                    at = separate(end);
                 }
                 Some(b'!') if properties.tag.is_none() => {
                     let end = if input.get(at + 1) == Some(&b'<') {
@@ -871,7 +882,7 @@ where
                         self.token_end(at)
                     };
                     properties.tag = Some(&input[at..end]);
-                    at = self.skip_blanks(end);
+                    at = separate(end);
                 }
                 Some(b'&' | b'!') => return Err(error(YamlErrorKind::UnexpectedContent, at)),
                 _ => return Ok((properties, at)),
