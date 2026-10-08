@@ -90,6 +90,14 @@ Reported as `YamlErrorKind::Unsupported`: explicit keys (`? k`), empty keys
 (`[a]: b`) are rejected. Indentation of flow and quoted continuation lines is
 not validated.
 
+Raw characters outside the YAML printable set (`c-printable`) are accepted
+as content: C0 controls other than tab, LF, and CR; DEL; C1 controls other
+than U+0085; and U+FFFE/U+FFFF. Stage 1 sees every byte, but checking them
+there was measured at 9–10% of stage-1 throughput on the synthetic fixture
+(hybrid mode; about 1% in mask mode, under 0.5% of a full parse), both as a
+fourth class and as a per-block presence test that builds the lanes only
+on a hit. Callers that must reject them need a separate check.
+
 ## Verification
 
 - Event streams in yaml-test-suite notation for each feature, plus error
