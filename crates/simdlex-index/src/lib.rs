@@ -86,7 +86,7 @@ impl<S: IndexSpec> Indexer<S> {
             BackendKind::Ssse3 => ssse3::<S>,
             #[cfg(target_arch = "x86_64")]
             BackendKind::Avx2 => avx2::<S>,
-            #[cfg(target_arch = "aarch64")]
+            #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
             BackendKind::Neon => neon::<S>,
             _ => scalar::<S>,
         };
@@ -214,7 +214,7 @@ fn avx2<S: IndexSpec>(
     unsafe { inner::<S>(input, window, state, out) }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
 fn neon<S: IndexSpec>(
     input: &[u8],
     window: Range<usize>,
@@ -393,6 +393,13 @@ mod tests {
                 assert_eq!(classify_block::<Demo>(backend, &block).unwrap(), scalar);
             }
         }
+    }
+
+    #[test]
+    fn neon_is_available_only_on_little_endian_aarch64() {
+        let neon = cfg!(all(target_arch = "aarch64", target_endian = "little"));
+        assert_eq!(resolve_backend(BackendKind::Neon).is_ok(), neon);
+        assert_eq!(available_backends().any(|b| b == BackendKind::Neon), neon);
     }
 
     #[test]

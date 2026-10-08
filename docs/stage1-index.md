@@ -134,10 +134,10 @@ a parser that may stop early, such as one answering a `first` query, only
 indexes as far as it reads. Windows produce exactly the tape of a whole scan.
 
 Backends are chosen once per `Indexer`: AVX2 or SSSE3 by runtime detection on
-x86-64, NEON on aarch64, scalar elsewhere. Every backend is tested to
-produce identical masks for all 256 byte values; the NEON backend is
-verified by running the core test suite under Miri for
-`aarch64-unknown-linux-gnu`.
+x86-64, NEON on little-endian aarch64, scalar elsewhere (including
+big-endian aarch64). Every backend is tested to produce identical masks for
+all 256 byte values; the NEON backend is verified by running the core test
+suite under Miri for `aarch64-unknown-linux-gnu`.
 
 ## HTML
 

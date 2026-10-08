@@ -39,7 +39,7 @@ pub fn best_backend() -> BackendKind {
             return BackendKind::Ssse3;
         }
     }
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
     {
         return BackendKind::Neon;
     }
@@ -57,8 +57,9 @@ pub fn resolve_backend(backend: BackendKind) -> Result<BackendKind, BackendError
         BackendKind::Ssse3 => std::is_x86_feature_detected!("ssse3"),
         #[cfg(target_arch = "x86_64")]
         BackendKind::Avx2 => std::is_x86_feature_detected!("avx2"),
-        // NEON is part of the aarch64 baseline.
-        #[cfg(target_arch = "aarch64")]
+        // NEON is part of the aarch64 baseline. Big-endian aarch64 uses the
+        // scalar backend: `movemask_64` assumes little-endian lane packing.
+        #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
         BackendKind::Neon => true,
         #[allow(unreachable_patterns)]
         _ => false,
@@ -93,7 +94,7 @@ pub fn classify_block<S: IndexSpec>(
         BackendKind::Ssse3 => Ok(unsafe { classify_ssse3::<S>(block) }),
         #[cfg(target_arch = "x86_64")]
         BackendKind::Avx2 => Ok(unsafe { classify_avx2::<S>(block) }),
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
         BackendKind::Neon => Ok(unsafe { classify_neon::<S>(block) }),
         _ => Ok(classify_scalar::<S>(block)),
     }
@@ -187,7 +188,7 @@ pub(crate) unsafe fn classify_avx2<S: IndexSpec>(block: &[u8; 64]) -> Classified
     out
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
 #[inline]
 #[target_feature(enable = "neon")]
 pub(crate) unsafe fn classify_neon<S: IndexSpec>(block: &[u8; 64]) -> ClassifiedBlock {
@@ -224,7 +225,7 @@ pub(crate) unsafe fn classify_neon<S: IndexSpec>(block: &[u8; 64]) -> Classified
 /// Pack four 16-lane all-ones/all-zeros vectors into one 64-bit mask, as
 /// simdjson's NEON `to_bitmask` does: weight each lane by its bit, then
 /// pairwise-add until each byte holds eight lanes.
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
 #[inline]
 #[target_feature(enable = "neon")]
 unsafe fn movemask_64(lanes: [std::arch::aarch64::uint8x16_t; 4]) -> u64 {
