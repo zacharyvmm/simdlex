@@ -196,6 +196,8 @@ where
         } else {
             0
         };
+        // Directives must be followed by a `---` document start.
+        let mut directives = false;
 
         while line < len {
             let indent = self.masks.run_length(SPACE, line);
@@ -208,6 +210,7 @@ where
 
             if line == content {
                 if self.is_document_marker(line, b'-') {
+                    directives = false;
                     self.start_document(line, true)?;
                     let after = self.skip_blanks(line + 3);
                     line = if self.at_line_end(after) {
@@ -218,12 +221,16 @@ where
                     continue;
                 }
                 if self.is_document_marker(line, b'.') {
+                    if directives {
+                        return Err(error(YamlErrorKind::UnexpectedContent, line));
+                    }
                     self.end_document(line, true);
                     line = self.end_of_line(line + 3)?;
                     continue;
                 }
                 if self.input[line] == b'%' && !self.document_open {
                     // Directives are skipped; tag handles are not resolved.
+                    directives = true;
                     line = self.next_line(line);
                     continue;
                 }
@@ -233,11 +240,17 @@ where
                 return Err(error(YamlErrorKind::TabIndentation, content));
             }
             if !self.document_open {
+                if directives {
+                    return Err(error(YamlErrorKind::UnexpectedContent, content));
+                }
                 self.start_document(content, false)?;
             }
             line = self.block_line(line, content)?;
         }
 
+        if directives {
+            return Err(error(YamlErrorKind::UnexpectedContent, len));
+        }
         self.end_document(len, false);
         Ok(())
     }

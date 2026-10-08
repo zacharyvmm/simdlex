@@ -728,6 +728,37 @@ fn block_collections_start_after_the_document_marker_line() {
 }
 
 #[test]
+fn directives_need_a_document_start() {
+    for (input, offset) in [
+        ("%YAML 1.2\nb\n", 10),
+        ("a\n...\n%YAML 1.2\n# c\nb\n", 20),
+        ("%YAML 1.2\n...\n", 10),
+        ("%YAML 1.2\n...\n---\na\n", 10),
+        ("%YAML 1.2\n", 10),
+        ("%YAML 1.2\n# c\n", 14),
+    ] {
+        assert!(
+            reference(input).is_none(),
+            "the reference accepts {input:?}"
+        );
+        assert_eq!(
+            render(input).unwrap_err(),
+            error(YamlErrorKind::UnexpectedContent, offset),
+            "input: {input:?}"
+        );
+    }
+    assert_events(
+        "%TAG ! tag:x,2000:\n%YAML 1.2\n# c\n\n--- a\n...\n%YAML 1.2\n---\nb\n",
+        "+DOC ---
+         =VAL :a
+         -DOC ...
+         +DOC ---
+         =VAL :b
+         -DOC",
+    );
+}
+
+#[test]
 fn documents_comments_and_directives() {
     assert_events(
         "# leading comment\n%YAML 1.2\n---\na: 1 # trailing\n...\n--- text\n---\n- x\n",
