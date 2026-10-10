@@ -107,7 +107,7 @@ impl<G: Grammar> Parser<G> {
     fn reserve_index(&mut self) -> Result<(), CapacityError> {
         let max_input = self.max_input.unwrap_or(0);
         self.index
-            .try_reserve(self.mode, Indexer::<G>::layout(), max_input)
+            .try_reserve(self.mode, Indexer::<G>::layout(self.mode), max_input)
             .map_err(|_| CapacityError::AllocationFailed {
                 requested: max_input,
             })

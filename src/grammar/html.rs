@@ -196,7 +196,9 @@ impl Grammar for HtmlGrammar {
         // Monomorphize the walk per representation rather than dispatching
         // on the mode for every structural.
         match index {
-            IndexView::Tape(tape) => parse_tags(input, tape.iter().copied(), config, &mut sink),
+            IndexView::Tape(tape) | IndexView::Hybrid { tape, .. } => {
+                parse_tags(input, tape.iter().copied(), config, &mut sink)
+            }
             IndexView::Masks(masks) => {
                 parse_tags(input, masks.structural_positions(), config, &mut sink)
             }

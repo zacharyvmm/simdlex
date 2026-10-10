@@ -15,7 +15,9 @@ pub use extract::{
 pub use grammar::{
     Grammar, HtmlAttribute, HtmlAttributeValue, HtmlAttributes, HtmlConfig, HtmlEmit, HtmlError,
     HtmlErrorKind, HtmlEvent, HtmlGrammar, HtmlReader, HtmlStage1State, HtmlStartElement,
-    HtmlStreamEvent, HtmlStreamGrammar,
+    HtmlStreamEvent, HtmlStreamGrammar, YamlBlockScalar, YamlChomping, YamlCollectionStyle,
+    YamlConfig, YamlError, YamlErrorKind, YamlEvent, YamlGrammar, YamlProperties, YamlScalar,
+    YamlScalarStyle, YamlStage2State, decode_yaml_scalar,
 };
 #[cfg(any(feature = "json-test-grammar", test))]
 pub use grammar::{

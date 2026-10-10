@@ -17,6 +17,7 @@ simdlex-tablegen = { path = "crates/simdlex-tablegen" }
 [dev-dependencies]
 criterion = "0.5"
 serde_json = "1"
+yaml-rust2 = "0.13.0"
 
 [[bench]]
 name = "class_spans"

@@ -2,6 +2,7 @@
 
 mod html;
 mod html_stream;
+mod yaml;
 
 #[cfg(any(feature = "json-test-grammar", test))]
 mod json;
@@ -12,6 +13,12 @@ pub use html::{
 pub use html_stream::{
     HtmlAttribute, HtmlAttributeValue, HtmlAttributes, HtmlReader, HtmlStartElement,
     HtmlStreamEvent, HtmlStreamGrammar,
+};
+
+pub use yaml::{
+    YamlBlockScalar, YamlChomping, YamlCollectionStyle, YamlConfig, YamlError, YamlErrorKind,
+    YamlEvent, YamlGrammar, YamlProperties, YamlScalar, YamlScalarStyle, YamlStage2State,
+    decode_yaml_scalar,
 };
 
 #[cfg(any(feature = "json-test-grammar", test))]

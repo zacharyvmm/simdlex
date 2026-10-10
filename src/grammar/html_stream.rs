@@ -702,7 +702,7 @@ impl Grammar for HtmlStreamGrammar {
     {
         // Monomorphize the reader per representation.
         match index {
-            IndexView::Tape(tape) => {
+            IndexView::Tape(tape) | IndexView::Hybrid { tape, .. } => {
                 HtmlReader::from_positions(input, tape.iter().copied()).for_each(sink)
             }
             IndexView::Masks(masks) => {
