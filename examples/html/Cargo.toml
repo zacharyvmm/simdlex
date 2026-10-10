@@ -1,0 +1,16 @@
+[package]
+name = "simdlex-html"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Example: a StAX-style HTML element stream on a simdlex tape"
+
+[dependencies]
+simdlex = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "html"
+harness = false

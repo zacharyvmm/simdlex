@@ -1,20 +1,17 @@
 # Stage 1: table generation and indexing
 
-> Experimental. The crate boundaries and the `IndexSpec` hook are the point of
-> this change; the stage-2 HTML state machine is out of scope and the existing
-> tag walker is kept as the consumer.
-
-Stage 1 is split into two dependency-free crates. `simdlex` glues them to
-grammars and stage 2.
+simdlex is stage 1 of a simdjson-style parser, packaged as a primitive. It
+is two dependency-free crates, re-exported together by the `simdlex`
+facade:
 
 ```text
-crates/simdlex-tablegen   named byte sets ──► NibbleTables + class bits   (const fn, no_std)
-crates/simdlex-index      NibbleTables + IndexSpec ──► tape | masks | hybrid (scalar/SSSE3/AVX2)
-simdlex                   Grammar = IndexSpec + stage-2 parse(IndexView)
+crates/simdlex-tablegen   named byte sets ──► NibbleTables + class bits     (const fn, no_std)
+crates/simdlex-index      NibbleTables + IndexSpec ──► tape (+ class masks)  (scalar/SSSE3/AVX2/NEON)
 ```
 
 `simdlex-index` never sees the generator: tables are plain data, so
 hand-written tables keep working. `simdlex-tablegen` never sees a backend.
+Stage 2 is the user's: the grammars under `examples/` show three.
 
 ## What the index is for
 
@@ -57,7 +54,8 @@ in place while walking the line is cheaper than either.
 
 ### How to store it
 
-Once the bounds are chosen, their density picks the representation:
+Once the bounds are chosen, their density picks the representation, per
+class:
 
 - **Tape**, for sparse bounds. Stage 2 jumps from entry to entry. The cost
   is 4 bytes per bound, so it grows with density.
@@ -65,13 +63,15 @@ Once the bounds are chosen, their density picks the representation:
   is a fixed 8 bytes per class per 64-byte block, even for a block with
   nothing in it. `MaskView::run_length` measures indentation and
   `MaskView::next_in` finds the next line feed in a word operation or two.
-- **Hybrid**, when a grammar has both: dense classes stay masks and sparse
-  ones go to a tape. YAML uses this.
+
+A grammar with both, like YAML, keeps its dense classes as masks and puts
+the sparse ones on the tape (`IndexSpec::MASK_CLASSES`).
 
 Masks are not automatically cheaper to build. Classification is identical
-in every mode; only the output differs. For sparse bounds a tape writes less
-memory than a fixed set of masks per block. HTML's tape is 6.16 GiB/s in
-stage 1 versus 4.75 GiB/s for masks.
+either way; only the output differs. For sparse bounds a tape writes less
+memory than a fixed set of masks per block: when HTML's bounds were stored
+both ways, the tape built at 6.16 GiB/s and the masks at 4.75 GiB/s. That
+is why there is no masks-only mode.
 
 ## 1. Table generation (`simdlex-tablegen`)
 
@@ -99,7 +99,8 @@ tables get the same exhaustive check.
 
 ## 2. Execution (`simdlex-index`)
 
-An `IndexSpec` supplies tables, class selectors, and one hook:
+An `IndexSpec` supplies tables, class selectors, how many leading classes to
+keep as masks, and optionally a per-block hook:
 
 ```rust
 fn scan_block(input: &[u8; 64], base: u32, valid: u64,
@@ -107,50 +108,53 @@ fn scan_block(input: &[u8; 64], base: u32, valid: u64,
     -> Result<u64, Self::Error>;
 ```
 
-The backend classifies a block, the hook refines the masks (JSON removes
-in-string bytes and finds scalar starts; HTML just unions its four classes)
-and returns the structural lanes. The indexer then records the block in one
-of three modes, chosen at compile time inside the block loop:
+The backend classifies a block, the hook refines the masks and returns the
+structural lanes, which are flattened onto the tape. The default hook makes
+every class after the mask classes structural; JSON overrides it to drop
+bytes inside strings and to find scalar starts, carrying quote and escape
+state across blocks.
 
-| `IndexMode` | Storage | Cost | Use when |
-|---|---|---|---|
-| `Tape` | global `Vec<u32>` of offsets | 4 B per structural | delimiters are sparse single bytes (JSON, HTML tags) |
-| `Masks` | per block: structural + each class + each exact mask | `8 × (1 + classes + exacts)` B per 64 B, fixed | significant bytes are dense (YAML indentation) |
-| `Hybrid` | structural lanes on a tape, plus the first `HYBRID_MASK_CLASSES` class masks per block | 4 B per structural + `8 × classes` B per 64 B | a grammar has dense and sparse bounds (YAML: line feeds and spaces as masks, quotes on the tape) |
+The index is always a tape of `u32` offsets (4 B per structural), plus one
+mask per block for each of the first `MASK_CLASSES` classes
+(`8 × MASK_CLASSES` B per 64 B). A grammar with only sparse bounds (JSON,
+HTML) keeps no masks; YAML keeps line feeds and spaces as masks and puts
+quotes on the tape. Stage 2 walks them with:
 
-A spec declares its preferred `MODE`. `Parser::with_index_mode` overrides it
-for experiments. Stage 2 receives an `IndexView`:
-`tape()` / `masks()` give the raw representations (both, in hybrid mode),
-`positions()` yields structural offsets from any mode, and
-`MaskView::class_positions(c)` walks a single class lazily.
+- `TapeCursor`: `find(from, predicate)` returns the next structural at or
+  after `from` whose byte matches and stays on it; `seek(offset)` gallops
+  forward, then binary-searches, so a stage 2 that skips ahead without the
+  tape stays cheap.
+- `MaskView`: `next_in(classes, from)` finds the next lane in any of the
+  chosen classes, `run_length(class, from)` measures a run (indentation),
+  `class_positions(class)` iterates one class.
+
+`Indexer::index` scans a whole input. `Indexer::index_window` scans one
+window (aligned to 64 bytes) with state carried from the previous window, so
+a parser that may stop early, such as one answering a `first` query, only
+indexes as far as it reads. Windows produce exactly the tape of a whole scan.
+
+Backends are chosen once per `Indexer`: AVX2 or SSSE3 by runtime detection on
+x86-64, NEON on little-endian aarch64, scalar elsewhere (including
+big-endian aarch64). Every backend is tested to produce identical masks for
+all 256 byte values; the NEON backend is verified by running the core test
+suite under Miri for `aarch64-unknown-linux-gnu`.
 
 ## HTML
 
-HTML stage 1 indexes exactly `<`, `>`, `'`, and `"`, one class each.
-Whitespace, `/`, and `=` are not structural: the tag walker reads names,
-whitespace, and the `=` that follows an attribute name directly from the
-bytes between delimiters. Indexing `=` was measured and rejected: it was
-13–21% of structurals on real pages, stage 2 only ever skipped those
-entries, and dropping it made stage 1 8–12% faster with identical events.
+HTML's bounds are `<`, `>`, `'`, and `"`. Whitespace, `/`, and `=` are not
+structural: the tag walker reads names, whitespace, and the `=` that follows
+an attribute name directly from the bytes between delimiters. Indexing `=`
+was measured and rejected: it was 13–21% of structurals on real pages, stage
+2 only ever skipped those entries, and dropping it made stage 1 8–12% faster
+with identical events.
 
 Unlike JSON strings, quotes cannot be masked in stage 1, because a quote
 only opens a value inside a tag, and apostrophes in text would break
-prefix-XOR parity. Quote pairing therefore stays in stage 2. The default
-mode is `Tape`.
+prefix-XOR parity. Quote pairing therefore stays in stage 2.
 
-Measured on the `stage1/html` fixture (AVX2, 8 192 repetitions, ~1 MiB):
+## Next steps
 
-| | main | this change |
-|---|---|---|
-| stage 1, tape | 4.70 GiB/s | 6.16 GiB/s |
-| stage 1, masks | – | 4.75 GiB/s |
-| `extract_candidates` 8192 | 0.90 GiB/s | 1.06 GiB/s |
-
-JSON stage 1 on the same machine went from 1.76 GiB/s to 1.94 GiB/s.
-
-## Out of scope / next steps
-
-- HTML tree construction on top of the [element stream](html-stream.md).
-- YAML tree construction on top of the [event stream](yaml-stream.md), which
-  uses `Hybrid` by default.
+- Unrolled flattening (simdjson writes eight offsets at a time into padding).
+- A UTF-8 validation primitive for grammars that need it; the JSON and YAML
+  examples validate with the standard library before indexing.
 - Smarter tablegen search (overlapping rectangles) if a grammar needs it.

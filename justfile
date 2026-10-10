@@ -7,16 +7,18 @@ format:
     cargo fmt --all
 
 lint:
-    cargo clippy --workspace --all-targets --all-features -- -D warnings
+    cargo clippy --workspace --all-targets -- -D warnings
 
-build:
-    cargo build --release
+test:
+    cargo test --workspace
+
+# Run the core suite (including the NEON backend) under Miri for aarch64.
+test-neon:
+    cargo +nightly miri test -p simdlex-index --target aarch64-unknown-linux-gnu
 
 bench:
-    cargo bench
+    cargo bench --workspace
 
-bench-grammars:
-    cargo bench --features json-test-grammar --bench grammar_parser
-
+# Compare the JSON example's stage 1 with simdjson's (needs cmake and a C++ compiler).
 bench-reference:
-    tools/simdjson-reference.sh
+    examples/json/tools/simdjson-reference.sh

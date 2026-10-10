@@ -454,11 +454,16 @@ dependencies = [
 name = "simdlex"
 version = "0.1.0"
 dependencies = [
- "criterion",
- "serde_json",
  "simdlex-index",
  "simdlex-tablegen",
- "yaml-rust2",
+]
+
+[[package]]
+name = "simdlex-html"
+version = "0.0.0"
+dependencies = [
+ "criterion",
+ "simdlex",
 ]
 
 [[package]]
@@ -469,8 +474,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "simdlex-json"
+version = "0.0.0"
+dependencies = [
+ "criterion",
+ "serde_json",
+ "simdlex",
+]
+
+[[package]]
 name = "simdlex-tablegen"
 version = "0.1.0"
+
+[[package]]
+name = "simdlex-yaml"
+version = "0.0.0"
+dependencies = [
+ "criterion",
+ "simdlex",
+ "yaml-rust2",
+]
 
 [[package]]
 name = "syn"

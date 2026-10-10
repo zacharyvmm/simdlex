@@ -207,7 +207,17 @@ dependencies = [
  "libfuzzer-sys",
  "serde_json",
  "simdlex",
+ "simdlex-html",
+ "simdlex-json",
+ "simdlex-yaml",
  "yaml-rust2",
+]
+
+[[package]]
+name = "simdlex-html"
+version = "0.0.0"
+dependencies = [
+ "simdlex",
 ]
 
 [[package]]
@@ -215,8 +225,22 @@ name = "simdlex-index"
 version = "0.1.0"
 
 [[package]]
+name = "simdlex-json"
+version = "0.0.0"
+dependencies = [
+ "simdlex",
+]
+
+[[package]]
 name = "simdlex-tablegen"
 version = "0.1.0"
+
+[[package]]
+name = "simdlex-yaml"
+version = "0.0.0"
+dependencies = [
+ "simdlex",
+]
 
 [[package]]
 name = "syn"

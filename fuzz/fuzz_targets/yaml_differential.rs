@@ -1,8 +1,8 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use simdlex::{BackendKind, Parser, YamlConfig, YamlEvent, YamlGrammar, decode_yaml_scalar};
-use simdlex::YamlScalarStyle;
+use simdlex::{BackendKind, available_backends};
+use simdlex_yaml::{YamlConfig, YamlEvent, YamlParser, YamlScalarStyle, decode_yaml_scalar};
 use yaml_rust2::parser::{Event, EventReceiver, Parser as ReferenceParser};
 use yaml_rust2::scanner::TScalarStyle;
 
@@ -25,14 +25,16 @@ fn equivalent(ours: &[String], reference: &[String]) -> bool {
     }
     ours.len() == reference.len()
         && ours.iter().zip(reference).all(|(ours, reference)| {
-            ours == reference
-                || (ours.starts_with("=VAL | ") && *reference == format!("{ours}\n"))
+            ours == reference || (ours.starts_with("=VAL | ") && *reference == format!("{ours}\n"))
         })
 }
 
 /// Event kinds and decoded scalar values, which both parsers report.
-fn ours(input: &[u8], backend: BackendKind) -> Option<Result<Vec<String>, simdlex::YamlError>> {
-    let mut parser = Parser::<YamlGrammar>::with_backend(YamlConfig::default(), backend).ok()?;
+fn ours(
+    input: &[u8],
+    backend: BackendKind,
+) -> Option<Result<Vec<String>, simdlex_yaml::YamlError>> {
+    let mut parser = YamlParser::with_backend(YamlConfig::default(), backend).ok()?;
     let mut events = Vec::new();
     if let Err(error) = parser.parse_with(input, |event| events.push(event)) {
         return Some(Err(error));
@@ -86,7 +88,7 @@ impl EventReceiver for Reference {
 // must report the same events and values.
 fuzz_target!(|input: &[u8]| {
     let expected = ours(input, BackendKind::Scalar).unwrap();
-    for backend in [BackendKind::Ssse3, BackendKind::Avx2] {
+    for backend in available_backends() {
         if let Some(actual) = ours(input, backend) {
             assert_eq!(actual, expected);
         }
@@ -99,7 +101,10 @@ fuzz_target!(|input: &[u8]| {
         return;
     }
     let mut reference = Reference(Vec::new());
-    if ReferenceParser::new_from_str(text).load(&mut reference, true).is_ok() {
+    if ReferenceParser::new_from_str(text)
+        .load(&mut reference, true)
+        .is_ok()
+    {
         assert!(equivalent(&expected, &reference.0), "{text:?}");
     }
 });

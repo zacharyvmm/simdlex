@@ -1,11 +1,12 @@
-//! Grammar-neutral execution of nibble tables.
+//! simdjson-style structural indexing for any byte-level grammar.
 //!
-//! This crate is stage 1 of a simdjson-style pipeline: it classifies input in
-//! 64-byte blocks with a scalar, SSSE3, or AVX2 backend, lets an
-//! [`IndexSpec`] refine each block's masks, and records the result either as
-//! a global offset tape, as per-block masks, or as both (see [`IndexMode`]).
-//! It never interprets the result; stage-2 state machines consume an
-//! [`IndexView`].
+//! This crate is stage 1 of a two-stage parser. It classifies input in
+//! 64-byte blocks with a scalar, SSSE3, AVX2, or NEON backend, lets an
+//! [`IndexSpec`] refine each block (for example, removing bytes inside
+//! strings), and records the structural offsets on a tape. Specs may also
+//! keep per-block masks for dense classes such as indentation spaces. It
+//! never interprets the result: a stage-2 state machine walks the tape with a
+//! [`TapeCursor`] and the masks with a [`MaskView`].
 //!
 //! The index exists to find a grammar's *bounds* (tag edges, line ends,
 //! closing quotes) so that the stage-2 state machine can be placed at the
@@ -16,6 +17,10 @@
 //! `=` or YAML's `:`) only costs stage-1 time and gets skipped. See
 //! `docs/stage1-index.md` for the measurements behind this rule.
 //!
+//! Inputs can be indexed whole ([`Indexer::index`]) or in windows
+//! ([`Indexer::index_window`]), so a parser that may stop early (after a
+//! first match, say) only pays for the part of the input it reaches.
+//!
 //! Tables are plain data ([`NibbleTables`]), so this crate does not depend on
 //! how they were produced. `simdlex-tablegen` generates them at compile time.
 
@@ -23,24 +28,20 @@ mod backend;
 mod index;
 mod spec;
 
-pub use backend::{BackendError, BackendKind, best_backend, classify_block, resolve_backend};
-pub use index::{
-    IndexView, MaskLanes, MaskLayout, MaskView, Positions, SAFETY_PADDING, StructuralIndex,
-};
-pub use spec::{ClassifiedBlock, IndexMode, IndexSpec, NibbleTables, Utf8Policy};
+use std::ops::Range;
 
-/// Work counters for one scan.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct IndexMetrics {
-    pub blocks: usize,
-}
+pub use backend::{
+    BackendError, BackendKind, available_backends, best_backend, classify_block, resolve_backend,
+};
+pub use index::{MaskView, SAFETY_PADDING, StructuralIndex, TapeCursor};
+pub use spec::{ClassifiedBlock, IndexSpec, NibbleTables};
 
 type RunFn<S> = fn(
     &[u8],
-    IndexMode,
+    Range<usize>,
     &mut <S as IndexSpec>::State,
     &mut StructuralIndex,
-) -> Result<IndexMetrics, <S as IndexSpec>::Error>;
+) -> Result<(), <S as IndexSpec>::Error>;
 
 /// A backend-specialized scanner for one [`IndexSpec`]. CPU detection happens
 /// once, at construction.
@@ -63,6 +64,14 @@ impl<S: IndexSpec> Default for Indexer<S> {
     }
 }
 
+impl<S: IndexSpec> std::fmt::Debug for Indexer<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Indexer")
+            .field("backend", &self.backend)
+            .finish()
+    }
+}
+
 impl<S: IndexSpec> Indexer<S> {
     /// Use the fastest backend available on this CPU.
     pub fn new() -> Self {
@@ -77,6 +86,8 @@ impl<S: IndexSpec> Indexer<S> {
             BackendKind::Ssse3 => ssse3::<S>,
             #[cfg(target_arch = "x86_64")]
             BackendKind::Avx2 => avx2::<S>,
+            #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+            BackendKind::Neon => neon::<S>,
             _ => scalar::<S>,
         };
         Ok(Self { run, backend })
@@ -87,145 +98,155 @@ impl<S: IndexSpec> Indexer<S> {
         self.backend
     }
 
-    /// The mask layout `S` produces in `mode`.
-    #[inline]
-    pub const fn layout(mode: IndexMode) -> MaskLayout {
-        match mode {
-            IndexMode::Tape => MaskLayout {
-                structural: false,
-                classes: 0,
-                exacts: 0,
-            },
-            IndexMode::Masks => MaskLayout {
-                structural: true,
-                classes: S::CLASS_COUNT,
-                exacts: S::EXACT_COUNT,
-            },
-            IndexMode::Hybrid => MaskLayout {
-                structural: false,
-                classes: S::HYBRID_MASK_CLASSES,
-                exacts: 0,
-            },
-        }
+    /// Reserve `out` so that indexing windows of at most `max_window` bytes
+    /// never allocates.
+    pub fn reserve(
+        out: &mut StructuralIndex,
+        max_window: usize,
+    ) -> Result<(), std::collections::TryReserveError> {
+        out.try_reserve(S::MASK_CLASSES, max_window)
     }
 
-    /// Scan `input` into `out`, replacing its previous contents. `state` is
-    /// reset first. Does not allocate when `out` was reserved for at least
-    /// `input.len()` bytes in `mode`.
+    /// Index all of `input` into `out`, replacing its contents. `state` is
+    /// reset first.
     #[inline]
     pub fn index(
         &self,
         input: &[u8],
-        mode: IndexMode,
         state: &mut S::State,
         out: &mut StructuralIndex,
-    ) -> Result<IndexMetrics, S::Error> {
+    ) -> Result<(), S::Error> {
+        *state = S::State::default();
+        self.index_window(input, 0..input.len(), state, out)
+    }
+
+    /// Index `input[window]` into `out`, replacing its contents. Offsets on
+    /// the tape stay absolute.
+    ///
+    /// Windows let a parser index ahead of itself a bounded amount at a time.
+    /// Index consecutive windows with the same `state`, starting from
+    /// `S::State::default()`, so that state such as "inside a string"
+    /// carries across them. The window must start on a 64-byte boundary and
+    /// end on one or at the end of `input`; [`IndexSpec::finish`] runs when it
+    /// reaches the end.
+    ///
+    /// # Panics
+    ///
+    /// If the window is misaligned or out of bounds, or `input` is
+    /// `u32::MAX` bytes or longer.
+    #[inline]
+    pub fn index_window(
+        &self,
+        input: &[u8],
+        window: Range<usize>,
+        state: &mut S::State,
+        out: &mut StructuralIndex,
+    ) -> Result<(), S::Error> {
         assert!(
             input.len() < u32::MAX as usize,
             "inputs must be shorter than u32::MAX bytes"
         );
-        (self.run)(input, mode, state, out)
+        assert!(
+            window.start.is_multiple_of(64)
+                && window.start <= window.end
+                && window.end <= input.len()
+                && (window.end.is_multiple_of(64) || window.end == input.len()),
+            "windows must start on a 64-byte boundary and end on one or at the end of input"
+        );
+        (self.run)(input, window, state, out)
     }
 }
 
 fn scalar<S: IndexSpec>(
     input: &[u8],
-    mode: IndexMode,
+    window: Range<usize>,
     state: &mut S::State,
     out: &mut StructuralIndex,
-) -> Result<IndexMetrics, S::Error> {
-    let classify = backend::classify_scalar::<S>;
-    match mode {
-        IndexMode::Tape => run::<S, TAPE>(input, state, out, classify),
-        IndexMode::Masks => run::<S, MASKS>(input, state, out, classify),
-        IndexMode::Hybrid => run::<S, HYBRID>(input, state, out, classify),
-    }
+) -> Result<(), S::Error> {
+    run::<S>(input, window, state, out, backend::classify_scalar::<S>)
 }
 
 #[cfg(target_arch = "x86_64")]
 fn ssse3<S: IndexSpec>(
     input: &[u8],
-    mode: IndexMode,
+    window: Range<usize>,
     state: &mut S::State,
     out: &mut StructuralIndex,
-) -> Result<IndexMetrics, S::Error> {
+) -> Result<(), S::Error> {
     #[target_feature(enable = "ssse3")]
-    unsafe fn inner<S: IndexSpec, const MODE: u8>(
+    unsafe fn inner<S: IndexSpec>(
         input: &[u8],
+        window: Range<usize>,
         state: &mut S::State,
         out: &mut StructuralIndex,
-    ) -> Result<IndexMetrics, S::Error> {
-        run::<S, MODE>(input, state, out, |block| unsafe {
+    ) -> Result<(), S::Error> {
+        run::<S>(input, window, state, out, |block| unsafe {
             backend::classify_ssse3::<S>(block)
         })
     }
 
     // SAFETY: `Indexer::with_backend` only selects this function after
     // detecting SSSE3.
-    unsafe {
-        match mode {
-            IndexMode::Tape => inner::<S, TAPE>(input, state, out),
-            IndexMode::Masks => inner::<S, MASKS>(input, state, out),
-            IndexMode::Hybrid => inner::<S, HYBRID>(input, state, out),
-        }
-    }
+    unsafe { inner::<S>(input, window, state, out) }
 }
 
 #[cfg(target_arch = "x86_64")]
 fn avx2<S: IndexSpec>(
     input: &[u8],
-    mode: IndexMode,
+    window: Range<usize>,
     state: &mut S::State,
     out: &mut StructuralIndex,
-) -> Result<IndexMetrics, S::Error> {
+) -> Result<(), S::Error> {
     #[target_feature(enable = "avx2")]
-    unsafe fn inner<S: IndexSpec, const MODE: u8>(
+    unsafe fn inner<S: IndexSpec>(
         input: &[u8],
+        window: Range<usize>,
         state: &mut S::State,
         out: &mut StructuralIndex,
-    ) -> Result<IndexMetrics, S::Error> {
-        run::<S, MODE>(input, state, out, |block| unsafe {
+    ) -> Result<(), S::Error> {
+        run::<S>(input, window, state, out, |block| unsafe {
             backend::classify_avx2::<S>(block)
         })
     }
 
     // SAFETY: `Indexer::with_backend` only selects this function after
     // detecting AVX2.
-    unsafe {
-        match mode {
-            IndexMode::Tape => inner::<S, TAPE>(input, state, out),
-            IndexMode::Masks => inner::<S, MASKS>(input, state, out),
-            IndexMode::Hybrid => inner::<S, HYBRID>(input, state, out),
-        }
-    }
+    unsafe { inner::<S>(input, window, state, out) }
 }
 
-const TAPE: u8 = 0;
-const MASKS: u8 = 1;
-const HYBRID: u8 = 2;
-
-/// The block loop shared by every backend. `MODE` selects the output
-/// representation at compile time, so no mode pays for another.
-#[inline]
-fn run<S: IndexSpec, const MODE: u8>(
+#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+fn neon<S: IndexSpec>(
     input: &[u8],
+    window: Range<usize>,
+    state: &mut S::State,
+    out: &mut StructuralIndex,
+) -> Result<(), S::Error> {
+    #[target_feature(enable = "neon")]
+    unsafe fn inner<S: IndexSpec>(
+        input: &[u8],
+        window: Range<usize>,
+        state: &mut S::State,
+        out: &mut StructuralIndex,
+    ) -> Result<(), S::Error> {
+        run::<S>(input, window, state, out, |block| unsafe {
+            backend::classify_neon::<S>(block)
+        })
+    }
+
+    // SAFETY: NEON is part of the aarch64 baseline.
+    unsafe { inner::<S>(input, window, state, out) }
+}
+
+/// The block loop shared by every backend.
+#[inline]
+fn run<S: IndexSpec>(
+    input: &[u8],
+    window: Range<usize>,
     state: &mut S::State,
     out: &mut StructuralIndex,
     classify: impl Fn(&[u8; 64]) -> ClassifiedBlock,
-) -> Result<IndexMetrics, S::Error> {
-    *state = S::State::default();
-    let mode = match MODE {
-        TAPE => IndexMode::Tape,
-        MASKS => IndexMode::Masks,
-        _ => IndexMode::Hybrid,
-    };
-    out.prepare(mode, Indexer::<S>::layout(mode), input.len());
-
-    if S::UTF8_POLICY == Utf8Policy::Validate
-        && let Err(error) = std::str::from_utf8(input)
-    {
-        return Err(S::utf8_error(error.valid_up_to() as u32));
-    }
+) -> Result<(), S::Error> {
+    out.prepare(window.clone(), S::MASK_CLASSES);
 
     let mut emit_block = |block: &[u8; 64],
                           base: u32,
@@ -233,38 +254,34 @@ fn run<S: IndexSpec, const MODE: u8>(
                           masks: &mut ClassifiedBlock|
      -> Result<(), S::Error> {
         let structural = S::scan_block(block, base, valid, masks, state)? & valid;
-        if MODE != TAPE {
-            out.push_block(structural, masks);
+        if S::MASK_CLASSES > 0 {
+            out.push_masks(masks);
         }
-        if MODE != MASKS {
-            out.flatten(structural, base);
-        }
+        out.flatten(structural, base);
         Ok(())
     };
 
-    let full_blocks = input.len() / 64;
-    for block_index in 0..full_blocks {
-        let start = block_index * 64;
+    let full_end = window.start + (window.end - window.start) / 64 * 64;
+    for start in (window.start..full_end).step_by(64) {
         let block: &[u8; 64] = input[start..start + 64].try_into().unwrap();
         let mut masks = classify(block);
         emit_block(block, start as u32, u64::MAX, &mut masks)?;
     }
 
-    let tail_start = full_blocks * 64;
-    if tail_start < input.len() {
-        let tail_len = input.len() - tail_start;
+    if full_end < window.end {
+        let tail_len = window.end - full_end;
         let mut padded = [0u8; 64];
-        padded[..tail_len].copy_from_slice(&input[tail_start..]);
+        padded[..tail_len].copy_from_slice(&input[full_end..window.end]);
         let valid = (1u64 << tail_len) - 1;
         let mut masks = classify(&padded);
         masks.retain(valid);
-        emit_block(&padded, tail_start as u32, valid, &mut masks)?;
+        emit_block(&padded, full_end as u32, valid, &mut masks)?;
     }
 
-    S::finish(input.len() as u32, state)?;
-    Ok(IndexMetrics {
-        blocks: full_blocks + usize::from(tail_start < input.len()),
-    })
+    if window.end == input.len() {
+        S::finish(input.len() as u32, state)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -273,13 +290,12 @@ mod tests {
     use simdlex_tablegen::{ByteSet, Tables, generate, unwrap};
 
     const GENERATED: Tables<3> = unwrap(generate(&[
+        ByteSet::from_bytes(b" \n"),
         ByteSet::from_bytes(b"<>"),
         ByteSet::from_bytes(b"="),
-        ByteSet::from_bytes(b" \n"),
     ]));
 
-    /// Indexes `<`, `>`, and `=`; whitespace is classified but not
-    /// structural, so it only appears in mask mode.
+    /// Keeps whitespace as masks and puts `<`, `>`, and `=` on the tape.
     struct Demo;
 
     impl IndexSpec for Demo {
@@ -292,32 +308,79 @@ mod tests {
         };
         const CLASS_BITS: [u8; 8] = GENERATED.padded_class_bits();
         const CLASS_COUNT: usize = 3;
-        const EXACT_BYTES: [u8; 4] = [b'x', 0, 0, 0];
-        const EXACT_COUNT: usize = 1;
-        const UTF8_POLICY: Utf8Policy = Utf8Policy::ByteOriented;
-        const MODE: IndexMode = IndexMode::Tape;
+        const MASK_CLASSES: usize = 1;
+    }
+
+    const QUOTES: Tables<2> = unwrap(generate(&[
+        ByteSet::from_bytes(b"<"),
+        ByteSet::from_bytes(b"\""),
+    ]));
+
+    /// `<` outside double quotes, with quote state carried across blocks and
+    /// windows, and an error for an unterminated quote.
+    struct Quoted;
+
+    impl IndexSpec for Quoted {
+        type State = bool;
+        type Error = u32;
+
+        const TABLES: NibbleTables = NibbleTables {
+            low: QUOTES.low,
+            high: QUOTES.high,
+        };
+        const CLASS_BITS: [u8; 8] = QUOTES.padded_class_bits();
+        const CLASS_COUNT: usize = 2;
 
         fn scan_block(
             _input: &[u8; 64],
             _base: u32,
             _valid: u64,
             masks: &mut ClassifiedBlock,
-            _state: &mut (),
-        ) -> Result<u64, ()> {
-            Ok(masks.class[0] | masks.class[1])
+            in_quote: &mut bool,
+        ) -> Result<u64, u32> {
+            let mut inside = 0u64;
+            let mut quotes = masks.class[1];
+            let mut open = *in_quote;
+            let mut lane = 0;
+            while lane < 64 {
+                let next = if quotes == 0 {
+                    64
+                } else {
+                    quotes.trailing_zeros()
+                };
+                if open {
+                    let span = if next == 64 {
+                        u64::MAX << lane
+                    } else {
+                        ((1u64 << next) - 1) & (u64::MAX << lane)
+                    };
+                    inside |= span;
+                }
+                if next == 64 {
+                    break;
+                }
+                open = !open;
+                quotes &= quotes - 1;
+                lane = next + 1;
+            }
+            *in_quote = open;
+            Ok(masks.class[0] & !inside)
         }
 
-        fn finish(_input_len: u32, _state: &mut ()) -> Result<(), ()> {
-            Ok(())
+        fn finish(input_len: u32, in_quote: &mut bool) -> Result<(), u32> {
+            if *in_quote { Err(input_len) } else { Ok(()) }
         }
-
-        fn utf8_error(_offset: u32) {}
     }
 
-    fn backends() -> Vec<BackendKind> {
-        [BackendKind::Scalar, BackendKind::Ssse3, BackendKind::Avx2]
-            .into_iter()
-            .filter(|&backend| resolve_backend(backend).is_ok())
+    fn sample(len: usize, alphabet: &[u8], seed: u64) -> Vec<u8> {
+        let mut state = seed | 1;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                alphabet[(state % alphabet.len() as u64) as usize]
+            })
             .collect()
     }
 
@@ -326,74 +389,122 @@ mod tests {
         for group in 0..4 {
             let block: [u8; 64] = std::array::from_fn(|lane| (group * 64 + lane) as u8);
             let scalar = classify_block::<Demo>(BackendKind::Scalar, &block).unwrap();
-            for backend in backends() {
+            for backend in available_backends() {
                 assert_eq!(classify_block::<Demo>(backend, &block).unwrap(), scalar);
             }
         }
     }
 
     #[test]
-    fn tape_and_masks_agree_for_alignments_and_tails() {
-        let template = b"<a b=c>\n<d e = 'f'> x <g/>";
-        for repeat in [1, 3, 9] {
-            let input = template.repeat(repeat);
-            for start in 0..input.len().min(70) {
-                let input = &input[start..];
-                let expected: Vec<u32> = input
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, byte)| matches!(byte, b'<' | b'>' | b'='))
-                    .map(|(offset, _)| offset as u32)
-                    .collect();
+    fn neon_is_available_only_on_little_endian_aarch64() {
+        let neon = cfg!(all(target_arch = "aarch64", target_endian = "little"));
+        assert_eq!(resolve_backend(BackendKind::Neon).is_ok(), neon);
+        assert_eq!(available_backends().any(|b| b == BackendKind::Neon), neon);
+    }
 
-                for backend in backends() {
-                    let indexer = Indexer::<Demo>::with_backend(backend).unwrap();
-                    let mut index = StructuralIndex::new();
+    #[test]
+    fn tape_and_masks_match_a_byte_scan_for_alignments_and_tails() {
+        for len in [0, 1, 63, 64, 65, 127, 128, 129, 300] {
+            let input = sample(len, b"<a b=c>\n <", len as u64 + 7);
+            let expected_tape: Vec<u32> = (0..len)
+                .filter(|&i| matches!(input[i], b'<' | b'>' | b'='))
+                .map(|i| i as u32)
+                .collect();
+            let expected_spaces: Vec<usize> = (0..len)
+                .filter(|&i| matches!(input[i], b' ' | b'\n'))
+                .collect();
 
-                    indexer
-                        .index(input, IndexMode::Tape, &mut (), &mut index)
-                        .unwrap();
-                    assert_eq!(index.view().tape().unwrap(), expected);
+            for backend in available_backends() {
+                let indexer = Indexer::<Demo>::with_backend(backend).unwrap();
+                let mut index = StructuralIndex::new();
+                indexer.index(&input, &mut (), &mut index).unwrap();
+                assert_eq!(index.tape(), expected_tape, "{backend:?} len {len}");
+                let masks = index.masks();
+                assert_eq!(masks.blocks(), 0..len.div_ceil(64));
+                assert_eq!(
+                    masks.class_positions(0).collect::<Vec<_>>(),
+                    expected_spaces
+                );
+                assert_eq!(
+                    index.bytes(),
+                    expected_tape.len() * 4 + len.div_ceil(64) * 8
+                );
+            }
+        }
+    }
 
-                    indexer
-                        .index(input, IndexMode::Masks, &mut (), &mut index)
-                        .unwrap();
-                    let view = index.view();
-                    assert_eq!(view.positions().collect::<Vec<_>>(), expected);
-                    assert_eq!(view.structural_count(), expected.len());
+    #[test]
+    fn windows_concatenate_to_the_whole_index_and_carry_state() {
+        let input = sample(1_000, b"<<\"ab ", 3);
+        let indexer = Indexer::<Quoted>::new();
+        let mut whole = StructuralIndex::new();
+        let mut state = false;
+        let whole_result = indexer.index(&input, &mut state, &mut whole);
 
-                    let masks = view.masks().unwrap();
-                    assert_eq!(masks.blocks(), input.len().div_ceil(64));
-                    let whitespace: Vec<u32> = masks.class_positions(2).collect();
-                    let expected_whitespace: Vec<u32> = input
+        for window in [64, 128, 320, 960] {
+            let mut tape = Vec::new();
+            let mut state = false;
+            let mut index = StructuralIndex::new();
+            let mut result = Ok(());
+            for start in (0..input.len()).step_by(window) {
+                let end = (start + window).min(input.len());
+                result = indexer.index_window(&input, start..end, &mut state, &mut index);
+                assert_eq!(index.window(), start..end);
+                assert!(
+                    index
+                        .tape()
                         .iter()
-                        .enumerate()
-                        .filter(|(_, byte)| matches!(byte, b' ' | b'\n'))
-                        .map(|(offset, _)| offset as u32)
-                        .collect();
-                    assert_eq!(whitespace, expected_whitespace);
-                    let xs: u32 = (0..masks.blocks())
-                        .map(|block| masks.exact(block, 0).count_ones())
-                        .sum();
-                    assert_eq!(xs as usize, input.iter().filter(|&&b| b == b'x').count());
+                        .all(|&o| (start..end).contains(&(o as usize)))
+                );
+                tape.extend_from_slice(index.tape());
+            }
+            assert_eq!(tape, whole.tape(), "window {window}");
+            assert_eq!(result, whole_result);
+        }
+    }
 
-                    indexer
-                        .index(input, IndexMode::Hybrid, &mut (), &mut index)
-                        .unwrap();
-                    let view = index.view();
-                    assert_eq!(view.mode(), IndexMode::Hybrid);
-                    assert_eq!(view.tape().unwrap(), expected);
-                    let masks = view.masks().unwrap();
-                    assert!(!masks.layout().structural);
-                    assert_eq!(
-                        masks.class_positions(2).collect::<Vec<_>>(),
-                        expected_whitespace
-                    );
-                    assert_eq!(
-                        view.bytes(),
-                        expected.len() * 4 + input.len().div_ceil(64) * 3 * 8
-                    );
-                }
+    #[test]
+    #[should_panic(expected = "64-byte boundary")]
+    fn misaligned_windows_panic() {
+        let input = [b' '; 200];
+        Indexer::<Demo>::new()
+            .index_window(&input, 10..100, &mut (), &mut StructuralIndex::new())
+            .unwrap();
+    }
+
+    #[test]
+    fn cursor_seek_and_find_match_linear_search() {
+        let input = sample(2_000, b"<a>==  ", 11);
+        let mut index = StructuralIndex::new();
+        Indexer::<Demo>::new()
+            .index(&input, &mut (), &mut index)
+            .unwrap();
+        let tape = index.tape();
+
+        let mut cursor = index.cursor();
+        let mut rng = 5u64;
+        for _ in 0..2_000 {
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let from = (rng >> 33) as usize % (input.len() + 5);
+            let expected_seek = tape
+                .iter()
+                .position(|&o| o as usize >= from)
+                .unwrap_or(tape.len());
+            cursor.seek(from);
+            assert_eq!(cursor.index(), expected_seek);
+
+            let expected = tape
+                .iter()
+                .map(|&o| o as usize)
+                .find(|&o| o >= from && input[o] == b'>');
+            assert_eq!(cursor.find(&input, from, |b| b == b'>'), expected);
+            let mut resumed = TapeCursor::at(tape, rng as usize % (tape.len() + 3));
+            assert_eq!(resumed.find(&input, from, |b| b == b'>'), expected);
+            if let Some(found) = expected {
+                assert_eq!(cursor.peek(), Some(found));
+                assert_eq!(cursor.find(&input, from, |b| b == b'>'), expected);
             }
         }
     }
@@ -403,84 +514,54 @@ mod tests {
         let mut input = b"<a  b=c>  \n".repeat(20);
         input.extend_from_slice(&[b' '; 130]);
         input.push(b'=');
-        let indexer = Indexer::<Demo>::new();
         let mut index = StructuralIndex::new();
-        indexer
-            .index(&input, IndexMode::Masks, &mut (), &mut index)
+        Indexer::<Demo>::new()
+            .index(&input, &mut (), &mut index)
             .unwrap();
-        let masks = index.view().masks().unwrap();
+        let masks = index.masks();
 
         for from in 0..=input.len() + 70 {
             let expected_next = input
                 .iter()
                 .enumerate()
                 .skip(from)
-                .find(|(_, byte)| matches!(byte, b'=' | b' ' | b'\n'))
+                .find(|(_, byte)| matches!(byte, b' ' | b'\n'))
                 .map(|(offset, _)| offset);
-            assert_eq!(masks.next_in(0b110, from), expected_next, "from {from}");
+            assert_eq!(masks.next_in(0b1, from), expected_next, "from {from}");
 
             let expected_run = input
                 .iter()
                 .skip(from)
                 .take_while(|&&byte| matches!(byte, b' ' | b'\n'))
                 .count();
-            assert_eq!(masks.run_length(2, from), expected_run, "from {from}");
+            assert_eq!(masks.run_length(0, from), expected_run, "from {from}");
         }
     }
 
-    /// [`Demo`] with no class masks kept in hybrid mode.
-    struct TapeOnlyHybrid;
+    /// [`Demo`] with every class on the tape.
+    struct TapeOnly;
 
-    impl IndexSpec for TapeOnlyHybrid {
+    impl IndexSpec for TapeOnly {
         type State = ();
         type Error = ();
 
         const TABLES: NibbleTables = Demo::TABLES;
         const CLASS_BITS: [u8; 8] = Demo::CLASS_BITS;
         const CLASS_COUNT: usize = Demo::CLASS_COUNT;
-        const EXACT_BYTES: [u8; 4] = Demo::EXACT_BYTES;
-        const EXACT_COUNT: usize = Demo::EXACT_COUNT;
-        const UTF8_POLICY: Utf8Policy = Demo::UTF8_POLICY;
-        const MODE: IndexMode = IndexMode::Hybrid;
-        const HYBRID_MASK_CLASSES: usize = 0;
-
-        fn scan_block(
-            input: &[u8; 64],
-            base: u32,
-            valid: u64,
-            masks: &mut ClassifiedBlock,
-            state: &mut (),
-        ) -> Result<u64, ()> {
-            Demo::scan_block(input, base, valid, masks, state)
-        }
-
-        fn finish(input_len: u32, state: &mut ()) -> Result<(), ()> {
-            Demo::finish(input_len, state)
-        }
-
-        fn utf8_error(offset: u32) {
-            Demo::utf8_error(offset)
-        }
     }
 
     #[test]
-    fn hybrid_masks_without_classes_still_count_blocks() {
-        let indexer = Indexer::<TapeOnlyHybrid>::new();
+    fn indexes_without_mask_classes_have_no_mask_blocks() {
+        let indexer = Indexer::<TapeOnly>::new();
         let mut index = StructuralIndex::new();
         for len in [0, 1, 64, 65, 200] {
             let input = b"<a=b> ".repeat(40);
-            let input = &input[..len];
-            indexer
-                .index(input, IndexMode::Hybrid, &mut (), &mut index)
-                .unwrap();
-            let masks = index.view().masks().unwrap();
-            assert_eq!(masks.layout().stride(), 0);
-            assert_eq!(masks.blocks(), len.div_ceil(64));
+            indexer.index(&input[..len], &mut (), &mut index).unwrap();
+            let masks = index.masks();
+            assert_eq!(masks.classes(), 0);
+            assert!(masks.blocks().is_empty());
             assert_eq!(masks.next_in(0b111, 0), None);
-            assert_eq!(
-                index.view().bytes(),
-                size_of_val(index.view().tape().unwrap())
-            );
+            assert_eq!(index.bytes(), size_of_val(index.tape()));
         }
     }
 
@@ -488,18 +569,10 @@ mod tests {
     fn reserved_index_is_reused() {
         let indexer = Indexer::<Demo>::new();
         let mut index = StructuralIndex::new();
-        index
-            .try_reserve(
-                IndexMode::Masks,
-                Indexer::<Demo>::layout(IndexMode::Masks),
-                256,
-            )
-            .unwrap();
+        Indexer::<Demo>::reserve(&mut index, 256).unwrap();
         let capacity = index.capacity_bytes();
-        indexer
-            .index(&[b'<'; 256], IndexMode::Masks, &mut (), &mut index)
-            .unwrap();
+        indexer.index(&[b'<'; 256], &mut (), &mut index).unwrap();
+        indexer.index(&[b' '; 200], &mut (), &mut index).unwrap();
         assert_eq!(index.capacity_bytes(), capacity);
-        assert_eq!(index.view().bytes(), 4 * 5 * 8);
     }
 }

@@ -8,6 +8,7 @@ pub enum BackendKind {
     Scalar,
     Ssse3,
     Avx2,
+    Neon,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,30 +39,48 @@ pub fn best_backend() -> BackendKind {
             return BackendKind::Ssse3;
         }
     }
+    #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+    {
+        return BackendKind::Neon;
+    }
 
+    #[allow(unreachable_code)]
     BackendKind::Scalar
 }
 
 /// Resolve `Auto` and check that `backend` can run on this CPU.
 pub fn resolve_backend(backend: BackendKind) -> Result<BackendKind, BackendError> {
-    match backend {
-        BackendKind::Auto => Ok(best_backend()),
-        BackendKind::Scalar => Ok(backend),
-        BackendKind::Ssse3 => {
-            #[cfg(target_arch = "x86_64")]
-            if std::is_x86_feature_detected!("ssse3") {
-                return Ok(backend);
-            }
-            Err(BackendError { requested: backend })
-        }
-        BackendKind::Avx2 => {
-            #[cfg(target_arch = "x86_64")]
-            if std::is_x86_feature_detected!("avx2") {
-                return Ok(backend);
-            }
-            Err(BackendError { requested: backend })
-        }
+    let available = match backend {
+        BackendKind::Auto => return Ok(best_backend()),
+        BackendKind::Scalar => true,
+        #[cfg(target_arch = "x86_64")]
+        BackendKind::Ssse3 => std::is_x86_feature_detected!("ssse3"),
+        #[cfg(target_arch = "x86_64")]
+        BackendKind::Avx2 => std::is_x86_feature_detected!("avx2"),
+        // NEON is part of the aarch64 baseline. Big-endian aarch64 uses the
+        // scalar backend: `movemask_64` assumes little-endian lane packing.
+        #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+        BackendKind::Neon => true,
+        #[allow(unreachable_patterns)]
+        _ => false,
+    };
+    if available {
+        Ok(backend)
+    } else {
+        Err(BackendError { requested: backend })
     }
+}
+
+/// Every backend that can run on this CPU, scalar first.
+pub fn available_backends() -> impl Iterator<Item = BackendKind> {
+    [
+        BackendKind::Scalar,
+        BackendKind::Ssse3,
+        BackendKind::Avx2,
+        BackendKind::Neon,
+    ]
+    .into_iter()
+    .filter(|&backend| resolve_backend(backend).is_ok())
 }
 
 /// Classify one block with a specific backend. Intended for tests and
@@ -75,6 +94,8 @@ pub fn classify_block<S: IndexSpec>(
         BackendKind::Ssse3 => Ok(unsafe { classify_ssse3::<S>(block) }),
         #[cfg(target_arch = "x86_64")]
         BackendKind::Avx2 => Ok(unsafe { classify_avx2::<S>(block) }),
+        #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+        BackendKind::Neon => Ok(unsafe { classify_neon::<S>(block) }),
         _ => Ok(classify_scalar::<S>(block)),
     }
 }
@@ -90,11 +111,6 @@ pub(crate) fn classify_scalar<S: IndexSpec>(block: &[u8; 64]) -> ClassifiedBlock
         for selected in 0..S::CLASS_COUNT {
             if class & S::CLASS_BITS[selected] != 0 {
                 out.class[selected] |= bit;
-            }
-        }
-        for selected in 0..S::EXACT_COUNT {
-            if byte == S::EXACT_BYTES[selected] {
-                out.exact[selected] |= bit;
             }
         }
     }
@@ -130,11 +146,6 @@ pub(crate) unsafe fn classify_ssse3<S: IndexSpec>(block: &[u8; 64]) -> Classifie
             let is_zero = _mm_cmpeq_epi8(selected_classes, zero);
             let class_mask = (!_mm_movemask_epi8(is_zero) as u32) & 0xffff;
             out.class[selected] |= (class_mask as u64) << shift;
-        }
-        for selected in 0..S::EXACT_COUNT {
-            let exact = _mm_set1_epi8(S::EXACT_BYTES[selected] as i8);
-            let exact_mask = (_mm_movemask_epi8(_mm_cmpeq_epi8(bytes, exact)) as u32) & 0xffff;
-            out.exact[selected] |= (exact_mask as u64) << shift;
         }
     }
 
@@ -172,12 +183,59 @@ pub(crate) unsafe fn classify_avx2<S: IndexSpec>(block: &[u8; 64]) -> Classified
             let class_mask = !_mm256_movemask_epi8(is_zero) as u32;
             out.class[selected] |= (class_mask as u64) << shift;
         }
-        for selected in 0..S::EXACT_COUNT {
-            let exact = _mm256_set1_epi8(S::EXACT_BYTES[selected] as i8);
-            let exact_mask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(bytes, exact)) as u32;
-            out.exact[selected] |= (exact_mask as u64) << shift;
-        }
     }
 
     out
+}
+
+#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+#[inline]
+#[target_feature(enable = "neon")]
+pub(crate) unsafe fn classify_neon<S: IndexSpec>(block: &[u8; 64]) -> ClassifiedBlock {
+    use std::arch::aarch64::*;
+
+    let mut out = ClassifiedBlock::default();
+    let lo_table = unsafe { vld1q_u8(S::TABLES.low.as_ptr()) };
+    let hi_table = unsafe { vld1q_u8(S::TABLES.high.as_ptr()) };
+    let nibble = vdupq_n_u8(0x0f);
+
+    let mut classes = [vdupq_n_u8(0); 4];
+    for (part, classes) in classes.iter_mut().enumerate() {
+        let bytes = unsafe { vld1q_u8(block.as_ptr().add(part * 16)) };
+        let low = vandq_u8(bytes, nibble);
+        let high = vshrq_n_u8::<4>(bytes);
+        *classes = vandq_u8(vqtbl1q_u8(lo_table, low), vqtbl1q_u8(hi_table, high));
+    }
+
+    for selected in 0..S::CLASS_COUNT {
+        let wanted = vdupq_n_u8(S::CLASS_BITS[selected]);
+        out.class[selected] = unsafe {
+            movemask_64([
+                vtstq_u8(classes[0], wanted),
+                vtstq_u8(classes[1], wanted),
+                vtstq_u8(classes[2], wanted),
+                vtstq_u8(classes[3], wanted),
+            ])
+        };
+    }
+
+    out
+}
+
+/// Pack four 16-lane all-ones/all-zeros vectors into one 64-bit mask, as
+/// simdjson's NEON `to_bitmask` does: weight each lane by its bit, then
+/// pairwise-add until each byte holds eight lanes.
+#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+#[inline]
+#[target_feature(enable = "neon")]
+unsafe fn movemask_64(lanes: [std::arch::aarch64::uint8x16_t; 4]) -> u64 {
+    use std::arch::aarch64::*;
+
+    const WEIGHTS: [u8; 16] = [1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128];
+    let weights = unsafe { vld1q_u8(WEIGHTS.as_ptr()) };
+    let first = vpaddq_u8(vandq_u8(lanes[0], weights), vandq_u8(lanes[1], weights));
+    let second = vpaddq_u8(vandq_u8(lanes[2], weights), vandq_u8(lanes[3], weights));
+    let both = vpaddq_u8(first, second);
+    let packed = vpaddq_u8(both, both);
+    vgetq_lane_u64::<0>(vreinterpretq_u64_u8(packed))
 }
