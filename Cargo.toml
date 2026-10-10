@@ -3,11 +3,16 @@ name = "simdlex"
 version = "0.1.0"
 edition = "2024"
 
+[workspace]
+members = ["crates/simdlex-tablegen", "crates/simdlex-index"]
+
 [features]
 default = []
 json-test-grammar = []
 
 [dependencies]
+simdlex-index = { path = "crates/simdlex-index" }
+simdlex-tablegen = { path = "crates/simdlex-tablegen" }
 
 [dev-dependencies]
 criterion = "0.5"

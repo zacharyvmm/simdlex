@@ -1,0 +1,7 @@
+[package]
+name = "simdlex-tablegen"
+version = "0.1.0"
+edition = "2024"
+description = "Compile-time generation of nibble lookup tables for simdlex byte classes"
+
+[dependencies]

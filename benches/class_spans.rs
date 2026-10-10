@@ -1,7 +1,7 @@
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use simdlex::{
-    BackendKind, DocumentKind, ExtractOptions, HtmlConfig, HtmlGrammar, Parser, extract_candidates,
-    extract_class_spans, split_class_tokens,
+    BackendKind, DocumentKind, ExtractOptions, HtmlConfig, HtmlGrammar, IndexMode, Parser,
+    extract_candidates, extract_class_spans, split_class_tokens,
 };
 
 fn bench_extract_class_spans(c: &mut Criterion) {
@@ -42,10 +42,21 @@ fn bench_html_stage1(c: &mut Criterion) {
         b.iter(|| scalar.stage1(black_box(&input)));
     });
 
-    let mut automatic = Parser::<HtmlGrammar>::new(HtmlConfig::default());
-    group.bench_function("auto", |b| {
-        b.iter(|| automatic.stage1(black_box(&input)));
-    });
+    for mode in [IndexMode::Tape, IndexMode::Masks] {
+        let mut automatic = Parser::<HtmlGrammar>::new(HtmlConfig::default())
+            .with_index_mode(mode)
+            .unwrap();
+        group.bench_function(format!("auto/{mode:?}"), |b| {
+            b.iter(|| automatic.stage1(black_box(&input)));
+        });
+        group.bench_function(format!("auto/{mode:?}/parse"), |b| {
+            b.iter(|| {
+                automatic.parse_with(black_box(&input), |event| {
+                    black_box(event);
+                })
+            });
+        });
+    }
 
     group.finish();
 }

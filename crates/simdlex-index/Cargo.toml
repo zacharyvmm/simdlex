@@ -1,0 +1,10 @@
+[package]
+name = "simdlex-index"
+version = "0.1.0"
+edition = "2024"
+description = "Grammar-neutral SIMD execution of nibble tables into a structural tape or block masks"
+
+[dependencies]
+
+[dev-dependencies]
+simdlex-tablegen = { path = "../simdlex-tablegen" }

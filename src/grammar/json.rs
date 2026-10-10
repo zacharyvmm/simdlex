@@ -1,13 +1,28 @@
 use std::fmt;
 
-use crate::grammar::{Grammar, NibbleTables, Utf8Policy, span};
-use crate::{CapacityError, ClassifiedBlock, Span};
+use simdlex_index::{ClassifiedBlock, IndexMode, IndexSpec, IndexView, NibbleTables, Utf8Policy};
+use simdlex_tablegen::{ByteSet, Tables, generate, unwrap};
 
-pub const OPERATOR_BITS: u8 = 1 | 2 | 4;
-pub const JSON_WHITESPACE_BITS: u8 = 8 | 16;
-pub const QUOTE_BITS: u8 = 32;
-pub const BACKSLASH_BITS: u8 = 64;
-pub const CONTROL_BITS: u8 = 128;
+use crate::grammar::{Grammar, span};
+use crate::{CapacityError, Span};
+
+/// Stage-1 classes, in mask order. Whitespace and controls overlap on
+/// `\t`, `\n`, and `\r`; the generator shares the control bit between them.
+const CLASSES: [ByteSet; 5] = [
+    ByteSet::from_bytes(b"[]{},:"),
+    ByteSet::from_bytes(b"\t\n\r "),
+    ByteSet::from_bytes(b"\""),
+    ByteSet::from_bytes(b"\\"),
+    ByteSet::range(0x00, 0x1f),
+];
+
+const GENERATED: Tables<5> = unwrap(generate(&CLASSES));
+
+pub const OPERATOR_BITS: u8 = GENERATED.class_bits[0];
+pub const JSON_WHITESPACE_BITS: u8 = GENERATED.class_bits[1];
+pub const QUOTE_BITS: u8 = GENERATED.class_bits[2];
+pub const BACKSLASH_BITS: u8 = GENERATED.class_bits[3];
+pub const CONTROL_BITS: u8 = GENERATED.class_bits[4];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JsonConfig {
@@ -107,50 +122,13 @@ pub struct JsonStage2State {
 #[derive(Debug, Clone, Copy)]
 pub struct JsonGrammar;
 
-impl Grammar for JsonGrammar {
-    type Config = JsonConfig;
+impl IndexSpec for JsonGrammar {
+    type State = JsonStage1State;
     type Error = JsonError;
-    type Event<'a> = JsonEvent<'a>;
-    type Stage1State = JsonStage1State;
-    type Stage2State = JsonStage2State;
 
     const TABLES: NibbleTables = NibbleTables {
-        low: [
-            16 | 128,
-            128,
-            32 | 128,
-            128,
-            128,
-            128,
-            128,
-            128,
-            128,
-            8 | 128,
-            2 | 8 | 128,
-            4 | 128,
-            1 | 64 | 128,
-            4 | 8 | 128,
-            128,
-            128,
-        ],
-        high: [
-            8 | 128,
-            128,
-            1 | 16 | 32,
-            2,
-            0,
-            4 | 64,
-            0,
-            4,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-        ],
+        low: GENERATED.low,
+        high: GENERATED.high,
     };
     const UTF8_POLICY: Utf8Policy = Utf8Policy::Validate;
     const CLASS_BITS: [u8; 8] = [
@@ -163,18 +141,18 @@ impl Grammar for JsonGrammar {
         0,
         0,
     ];
-    const CLASS_COUNT: usize = 5;
+    const CLASS_COUNT: usize = CLASSES.len();
     const EXACT_BYTES: [u8; 4] = [b'"', b'\\', b':', b','];
     const EXACT_COUNT: usize = 0;
+    const MODE: IndexMode = IndexMode::Tape;
 
     fn scan_block(
         _input: &[u8; 64],
         base: u32,
         valid: u64,
-        masks: &ClassifiedBlock,
-        state: &mut Self::Stage1State,
-        tape: &mut Vec<u32>,
-    ) -> Result<(), Self::Error> {
+        masks: &mut ClassifiedBlock,
+        state: &mut Self::State,
+    ) -> Result<u64, Self::Error> {
         let operators = masks.class[0] & valid;
         let whitespace = masks.class[1] & valid;
         let quotes = masks.class[2] & valid;
@@ -231,11 +209,7 @@ impl Grammar for JsonGrammar {
         let predecessor_delimiter = (delimiters << 1) | u64::from(state.previous_is_delimiter);
         let ordinary = outside & !operators & !whitespace;
         let scalar_starts = ordinary & predecessor_delimiter;
-        flatten_offsets(
-            outside_operators | opening_quotes | scalar_starts,
-            base,
-            tape,
-        );
+        let structural = outside_operators | opening_quotes | scalar_starts;
 
         state.in_string ^= unescaped_quotes.count_ones() & 1 != 0;
         state.escaped = state.in_string && escapes_next;
@@ -247,10 +221,10 @@ impl Grammar for JsonGrammar {
                 state.previous_is_delimiter = delimiters & last != 0;
             }
         }
-        Ok(())
+        Ok(structural)
     }
 
-    fn finish_stage1(input_len: u32, state: &mut Self::Stage1State) -> Result<(), Self::Error> {
+    fn finish(input_len: u32, state: &mut Self::State) -> Result<(), Self::Error> {
         if state.in_string || state.escaped {
             Err(error(JsonErrorKind::UnexpectedEof, input_len))
         } else {
@@ -258,9 +232,19 @@ impl Grammar for JsonGrammar {
         }
     }
 
+    fn utf8_error(offset: u32) -> Self::Error {
+        error(JsonErrorKind::Utf8, offset)
+    }
+}
+
+impl Grammar for JsonGrammar {
+    type Config = JsonConfig;
+    type Event<'a> = JsonEvent<'a>;
+    type Stage2State = JsonStage2State;
+
     fn parse<'a, F>(
         input: &'a [u8],
-        _tape: &[u32],
+        _index: IndexView<'_>,
         config: &Self::Config,
         state: &mut Self::Stage2State,
         mut sink: F,
@@ -287,10 +271,6 @@ impl Grammar for JsonGrammar {
 
     fn capacity_error(offset: u32) -> Self::Error {
         error(JsonErrorKind::Capacity, offset)
-    }
-
-    fn utf8_error(offset: u32) -> Self::Error {
-        error(JsonErrorKind::Utf8, offset)
     }
 
     fn reserve_stage2(
@@ -699,23 +679,6 @@ fn prefix_xor(mut mask: u64) -> u64 {
     mask ^= mask << 16;
     mask ^= mask << 32;
     mask
-}
-
-#[inline]
-fn flatten_offsets(mut mask: u64, base: u32, tape: &mut Vec<u32>) {
-    let additional = mask.count_ones() as usize;
-    debug_assert!(tape.capacity() - tape.len() >= additional);
-    let initial_len = tape.len();
-    let mut written = 0usize;
-    let output = unsafe { tape.as_mut_ptr().add(initial_len) };
-
-    while mask != 0 {
-        let lane = mask.trailing_zeros();
-        unsafe { output.add(written).write(base + lane) };
-        written += 1;
-        mask &= mask - 1;
-    }
-    unsafe { tape.set_len(initial_len + written) };
 }
 
 /// Decode a validated raw JSON string into reusable caller-owned storage.

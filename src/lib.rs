@@ -1,24 +1,30 @@
-mod backend;
-
 pub mod extract;
 pub mod grammar;
 mod parser;
 pub mod spans;
 pub mod split;
 
-pub use backend::ClassifiedBlock;
+/// Stage 1 execution: backends, tape and mask storage.
+pub use simdlex_index as index;
+/// Compile-time nibble table generation.
+pub use simdlex_tablegen as tablegen;
+
 pub use extract::{
     extract_candidates, extract_class_tokens, extract_tokens, html::extract_class_spans,
 };
 pub use grammar::{
     Grammar, HtmlConfig, HtmlEmit, HtmlError, HtmlErrorKind, HtmlEvent, HtmlGrammar,
-    HtmlStage1State, NibbleTables, Utf8Policy,
+    HtmlStage1State,
 };
 #[cfg(any(feature = "json-test-grammar", test))]
 pub use grammar::{
     JsonConfig, JsonError, JsonErrorKind, JsonEvent, JsonGrammar, RawJsonString, decode_json_string,
 };
-pub use parser::{BackendError, BackendKind, CapacityError, ParseStats, Parser, Stage1Stats};
+pub use parser::{CapacityError, ParseStats, Parser, Stage1Stats};
+pub use simdlex_index::{
+    BackendError, BackendKind, ClassifiedBlock, IndexMode, IndexSpec, IndexView, MaskView,
+    NibbleTables, Positions, Utf8Policy,
+};
 pub use spans::{
     CandidateOrigin, CandidateSyntax, ClassCandidate, ClassSpan, ClassToken, Diagnostic,
     DiagnosticKind, Document, DocumentKind, ExtractOptions, ExtractResult, Span,
