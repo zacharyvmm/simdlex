@@ -34,3 +34,10 @@ doc = false
 bench = false
 
 [workspace]
+
+[[bin]]
+name = "html_stream"
+path = "fuzz_targets/html_stream.rs"
+test = false
+doc = false
+bench = false

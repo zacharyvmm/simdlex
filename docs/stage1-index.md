@@ -93,6 +93,6 @@ JSON stage 1 on the same machine went from 1.76 GiB/s to 1.94 GiB/s.
 
 ## Out of scope / next steps
 
-- A tag-level HTML state machine driven directly by the tape or masks.
+- HTML tree construction on top of the [element stream](html-stream.md).
 - A dense-whitespace grammar (YAML-like) to exercise `Masks` as a default.
 - Smarter tablegen search (overlapping rectangles) if a grammar needs it.
