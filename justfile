@@ -14,7 +14,7 @@ test:
 
 # Run the core suite (including the NEON backend) under Miri for aarch64.
 test-neon:
-    cargo +nightly miri test -p simdlex-index --target aarch64-unknown-linux-gnu
+    cargo +nightly miri test -p simdlex --target aarch64-unknown-linux-gnu
 
 bench:
     cargo bench --workspace

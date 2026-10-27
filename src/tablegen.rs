@@ -14,13 +14,13 @@
 //! build instead of producing a wrong classifier. Every generated table is
 //! exhaustively verified against all 256 byte values before it is returned.
 //!
-//! The crate has no dependencies and knows nothing about how tables are
-//! executed. `simdlex-index` consumes the emitted `low`/`high` arrays.
+//! This module knows nothing about how tables are executed. The
+//! [`Indexer`](crate::Indexer) consumes the emitted `low`/`high` arrays.
 //!
 //! ```
-//! use simdlex_tablegen::{ByteSet, generate, unwrap};
+//! use simdlex::tablegen::{ByteSet, generate, unwrap};
 //!
-//! const TABLES: simdlex_tablegen::Tables<3> = unwrap(generate(&[
+//! const TABLES: simdlex::tablegen::Tables<3> = unwrap(generate(&[
 //!     ByteSet::from_bytes(b"<>"),
 //!     ByteSet::from_bytes(b"="),
 //!     ByteSet::from_bytes(b"'\""),
@@ -33,7 +33,7 @@
 //! Requests that cannot fit fail to compile:
 //!
 //! ```compile_fail
-//! use simdlex_tablegen::{ByteSet, Tables, generate, unwrap};
+//! use simdlex::tablegen::{ByteSet, Tables, generate, unwrap};
 //!
 //! // Nine bytes that share no nibble with each other need nine bits.
 //! const DIAGONAL: Tables<1> = unwrap(generate(&[ByteSet::from_bytes(&[
@@ -41,8 +41,6 @@
 //! ])]));
 //! # let _ = DIAGONAL;
 //! ```
-#![no_std]
-
 /// Classes beyond this count cannot be distinguished with an 8-bit table.
 pub const MAX_CLASSES: usize = 8;
 

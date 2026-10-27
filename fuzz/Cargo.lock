@@ -195,10 +195,6 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 [[package]]
 name = "simdlex"
 version = "0.1.0"
-dependencies = [
- "simdlex-index",
- "simdlex-tablegen",
-]
 
 [[package]]
 name = "simdlex-fuzz"
@@ -221,19 +217,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "simdlex-index"
-version = "0.1.0"
-
-[[package]]
 name = "simdlex-json"
 version = "0.0.0"
 dependencies = [
  "simdlex",
 ]
-
-[[package]]
-name = "simdlex-tablegen"
-version = "0.1.0"
 
 [[package]]
 name = "simdlex-yaml"

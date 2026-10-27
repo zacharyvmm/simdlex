@@ -2,7 +2,7 @@
 ///
 /// A byte is classified by intersecting `low[byte & 15]` and
 /// `high[byte >> 4]`. Specs assign meanings to the resulting eight bits.
-/// Tables can be written by hand or emitted by `simdlex-tablegen`.
+/// Tables can be written by hand or emitted by [`crate::tablegen`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NibbleTables {
     pub low: [u8; 16],

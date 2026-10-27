@@ -453,10 +453,6 @@ dependencies = [
 [[package]]
 name = "simdlex"
 version = "0.1.0"
-dependencies = [
- "simdlex-index",
- "simdlex-tablegen",
-]
 
 [[package]]
 name = "simdlex-html"
@@ -467,13 +463,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "simdlex-index"
-version = "0.1.0"
-dependencies = [
- "simdlex-tablegen",
-]
-
-[[package]]
 name = "simdlex-json"
 version = "0.0.0"
 dependencies = [
@@ -481,10 +470,6 @@ dependencies = [
  "serde_json",
  "simdlex",
 ]
-
-[[package]]
-name = "simdlex-tablegen"
-version = "0.1.0"
 
 [[package]]
 name = "simdlex-yaml"
