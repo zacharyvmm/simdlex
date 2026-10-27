@@ -3,17 +3,10 @@ use std::ops::Range;
 use crate::backend::{self, BackendError, BackendKind, resolve_backend};
 use crate::{ClassifiedBlock, IndexSpec, StructuralIndex};
 
-type RunFn<S> = fn(
-    &[u8],
-    Range<usize>,
-    &mut <S as IndexSpec>::State,
-    &mut StructuralIndex,
-) -> Result<(), <S as IndexSpec>::Error>;
-
 /// A backend-specialized scanner for one [`IndexSpec`]. CPU detection happens
 /// once, at construction.
 pub struct Indexer<S: IndexSpec> {
-    run: RunFn<S>,
+    scan: ScanFn<S>,
     backend: BackendKind,
 }
 
@@ -48,16 +41,10 @@ impl<S: IndexSpec> Indexer<S> {
 
     pub fn with_backend(backend: BackendKind) -> Result<Self, BackendError> {
         let backend = resolve_backend(backend)?;
-        let run: RunFn<S> = match backend {
-            #[cfg(target_arch = "x86_64")]
-            BackendKind::Ssse3 => ssse3::<S>,
-            #[cfg(target_arch = "x86_64")]
-            BackendKind::Avx2 => avx2::<S>,
-            #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
-            BackendKind::Neon => neon::<S>,
-            _ => scalar::<S>,
-        };
-        Ok(Self { run, backend })
+        Ok(Self {
+            scan: scan_fn::<S>(backend),
+            backend,
+        })
     }
 
     #[inline]
@@ -120,93 +107,17 @@ impl<S: IndexSpec> Indexer<S> {
                 && (window.end.is_multiple_of(64) || window.end == input.len()),
             "windows must start on a 64-byte boundary and end on one or at the end of input"
         );
-        (self.run)(input, window, state, out)
+        // SAFETY: `scan` was chosen for a backend that `resolve_backend`
+        // confirmed this CPU supports.
+        unsafe { (self.scan)(input, window, state, out) }
     }
 }
 
-fn scalar<S: IndexSpec>(
-    input: &[u8],
-    window: Range<usize>,
-    state: &mut S::State,
-    out: &mut StructuralIndex,
-) -> Result<(), S::Error> {
-    run::<S>(input, window, state, out, backend::classify_scalar::<S>)
-}
-
-#[cfg(target_arch = "x86_64")]
-fn ssse3<S: IndexSpec>(
-    input: &[u8],
-    window: Range<usize>,
-    state: &mut S::State,
-    out: &mut StructuralIndex,
-) -> Result<(), S::Error> {
-    #[target_feature(enable = "ssse3")]
-    unsafe fn inner<S: IndexSpec>(
-        input: &[u8],
-        window: Range<usize>,
-        state: &mut S::State,
-        out: &mut StructuralIndex,
-    ) -> Result<(), S::Error> {
-        run::<S>(input, window, state, out, |block| unsafe {
-            backend::classify_ssse3::<S>(block)
-        })
-    }
-
-    // SAFETY: `Indexer::with_backend` only selects this function after
-    // detecting SSSE3.
-    unsafe { inner::<S>(input, window, state, out) }
-}
-
-#[cfg(target_arch = "x86_64")]
-fn avx2<S: IndexSpec>(
-    input: &[u8],
-    window: Range<usize>,
-    state: &mut S::State,
-    out: &mut StructuralIndex,
-) -> Result<(), S::Error> {
-    #[target_feature(enable = "avx2")]
-    unsafe fn inner<S: IndexSpec>(
-        input: &[u8],
-        window: Range<usize>,
-        state: &mut S::State,
-        out: &mut StructuralIndex,
-    ) -> Result<(), S::Error> {
-        run::<S>(input, window, state, out, |block| unsafe {
-            backend::classify_avx2::<S>(block)
-        })
-    }
-
-    // SAFETY: `Indexer::with_backend` only selects this function after
-    // detecting AVX2.
-    unsafe { inner::<S>(input, window, state, out) }
-}
-
-#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
-fn neon<S: IndexSpec>(
-    input: &[u8],
-    window: Range<usize>,
-    state: &mut S::State,
-    out: &mut StructuralIndex,
-) -> Result<(), S::Error> {
-    #[target_feature(enable = "neon")]
-    unsafe fn inner<S: IndexSpec>(
-        input: &[u8],
-        window: Range<usize>,
-        state: &mut S::State,
-        out: &mut StructuralIndex,
-    ) -> Result<(), S::Error> {
-        run::<S>(input, window, state, out, |block| unsafe {
-            backend::classify_neon::<S>(block)
-        })
-    }
-
-    // SAFETY: NEON is part of the aarch64 baseline.
-    unsafe { inner::<S>(input, window, state, out) }
-}
-
-/// The block loop shared by every backend.
+/// The block loop shared by every backend: classify each block, let the spec
+/// refine it, and record it. Each backend gets its own copy, compiled with
+/// its target features, through the entry points below.
 #[inline]
-fn run<S: IndexSpec>(
+fn scan<S: IndexSpec>(
     input: &[u8],
     window: Range<usize>,
     state: &mut S::State,
@@ -214,41 +125,116 @@ fn run<S: IndexSpec>(
     classify: impl Fn(&[u8; 64]) -> ClassifiedBlock,
 ) -> Result<(), S::Error> {
     out.prepare(window.clone(), S::MASK_CLASSES);
-
-    let mut emit_block = |block: &[u8; 64],
-                          base: u32,
-                          valid: u64,
-                          masks: &mut ClassifiedBlock|
-     -> Result<(), S::Error> {
-        let structural = S::scan_block(block, base, valid, masks, state)? & valid;
-        if S::MASK_CLASSES > 0 {
-            out.push_masks(masks);
-        }
-        out.flatten(structural, base);
-        Ok(())
-    };
-
     let full_end = window.start + (window.end - window.start) / 64 * 64;
+
     for start in (window.start..full_end).step_by(64) {
         let block: &[u8; 64] = input[start..start + 64].try_into().unwrap();
-        let mut masks = classify(block);
-        emit_block(block, start as u32, u64::MAX, &mut masks)?;
+        index_block::<S>(block, start, u64::MAX, classify(block), state, out)?;
     }
 
     if full_end < window.end {
-        let tail_len = window.end - full_end;
-        let mut padded = [0u8; 64];
-        padded[..tail_len].copy_from_slice(&input[full_end..window.end]);
-        let valid = (1u64 << tail_len) - 1;
-        let mut masks = classify(&padded);
+        let tail = &input[full_end..window.end];
+        let mut block = [0u8; 64];
+        block[..tail.len()].copy_from_slice(tail);
+        let valid = (1u64 << tail.len()) - 1;
+        let mut masks = classify(&block);
         masks.retain(valid);
-        emit_block(&padded, full_end as u32, valid, &mut masks)?;
+        index_block::<S>(&block, full_end, valid, masks, state, out)?;
     }
 
     if window.end == input.len() {
         S::finish(input.len() as u32, state)?;
     }
     Ok(())
+}
+
+/// Refine one classified block with the spec and record it in `out`.
+#[inline(always)]
+fn index_block<S: IndexSpec>(
+    block: &[u8; 64],
+    start: usize,
+    valid: u64,
+    mut masks: ClassifiedBlock,
+    state: &mut S::State,
+    out: &mut StructuralIndex,
+) -> Result<(), S::Error> {
+    let base = start as u32;
+    let structural = S::scan_block(block, base, valid, &mut masks, state)? & valid;
+    if S::MASK_CLASSES > 0 {
+        out.push_masks(&masks);
+    }
+    out.flatten(structural, base);
+    Ok(())
+}
+
+/// [`scan`] specialized for one backend. Unsafe to call unless the CPU
+/// supports that backend's target features.
+type ScanFn<S> = unsafe fn(
+    &[u8],
+    Range<usize>,
+    &mut <S as IndexSpec>::State,
+    &mut StructuralIndex,
+) -> Result<(), <S as IndexSpec>::Error>;
+
+/// The entry point for a backend already checked by `resolve_backend`.
+fn scan_fn<S: IndexSpec>(backend: BackendKind) -> ScanFn<S> {
+    match backend {
+        #[cfg(target_arch = "x86_64")]
+        BackendKind::Ssse3 => scan_ssse3::<S>,
+        #[cfg(target_arch = "x86_64")]
+        BackendKind::Avx2 => scan_avx2::<S>,
+        #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+        BackendKind::Neon => scan_neon::<S>,
+        _ => scan_scalar::<S>,
+    }
+}
+
+unsafe fn scan_scalar<S: IndexSpec>(
+    input: &[u8],
+    window: Range<usize>,
+    state: &mut S::State,
+    out: &mut StructuralIndex,
+) -> Result<(), S::Error> {
+    scan::<S>(input, window, state, out, backend::classify_scalar::<S>)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "ssse3")]
+unsafe fn scan_ssse3<S: IndexSpec>(
+    input: &[u8],
+    window: Range<usize>,
+    state: &mut S::State,
+    out: &mut StructuralIndex,
+) -> Result<(), S::Error> {
+    scan::<S>(input, window, state, out, |block| unsafe {
+        backend::classify_ssse3::<S>(block)
+    })
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn scan_avx2<S: IndexSpec>(
+    input: &[u8],
+    window: Range<usize>,
+    state: &mut S::State,
+    out: &mut StructuralIndex,
+) -> Result<(), S::Error> {
+    scan::<S>(input, window, state, out, |block| unsafe {
+        backend::classify_avx2::<S>(block)
+    })
+}
+
+#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+#[target_feature(enable = "neon")]
+unsafe fn scan_neon<S: IndexSpec>(
+    input: &[u8],
+    window: Range<usize>,
+    state: &mut S::State,
+    out: &mut StructuralIndex,
+) -> Result<(), S::Error> {
+    scan::<S>(input, window, state, out, |block| unsafe {
+        backend::classify_neon::<S>(block)
+    })
 }
 
 #[cfg(test)]
