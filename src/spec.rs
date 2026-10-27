@@ -1,18 +1,35 @@
-/// The two 16-byte lookup tables executed by every backend.
+/// The lookup tables and class selectors executed by every backend.
 ///
 /// A byte is classified by intersecting `low[byte & 15]` and
-/// `high[byte >> 4]`. Specs assign meanings to the resulting eight bits.
-/// Tables can be written by hand or emitted by [`crate::tablegen`].
+/// `high[byte >> 4]`; it belongs to class `c` when the result shares a bit
+/// with `class_bits[c]`. Tables can be written by hand or generated, and
+/// exhaustively checked, at compile time by [`crate::tablegen`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NibbleTables {
     pub low: [u8; 16],
     pub high: [u8; 16],
+    /// One bit selector per class. Entries from `class_count` on are zero.
+    pub class_bits: [u8; 8],
+    /// Number of classes, at most eight.
+    pub class_count: usize,
 }
 
 impl NibbleTables {
+    /// The table bits set for `byte`, before class selection.
     #[inline]
     pub const fn classify(self, byte: u8) -> u8 {
         self.low[(byte & 0x0f) as usize] & self.high[(byte >> 4) as usize]
+    }
+
+    /// Number of the eight table bits that some class selects.
+    pub const fn bits_used(self) -> u32 {
+        let mut used = 0u8;
+        let mut class = 0;
+        while class < self.class_bits.len() {
+            used |= self.class_bits[class];
+            class += 1;
+        }
+        used.count_ones()
     }
 }
 
@@ -54,10 +71,8 @@ pub trait IndexSpec: Sized {
     type State: Default;
     type Error;
 
+    /// The byte classes, usually `tablegen::unwrap(tablegen::generate(..))`.
     const TABLES: NibbleTables;
-    /// Up to eight bit selectors applied to [`Self::TABLES`].
-    const CLASS_BITS: [u8; 8];
-    const CLASS_COUNT: usize;
     /// How many leading classes keep their masks per block. With the default
     /// of 0 the index is a tape only, as in simdjson.
     const MASK_CLASSES: usize = 0;
@@ -76,7 +91,7 @@ pub trait IndexSpec: Sized {
         masks: &mut ClassifiedBlock,
         _state: &mut Self::State,
     ) -> Result<u64, Self::Error> {
-        Ok(masks.union(Self::MASK_CLASSES..Self::CLASS_COUNT))
+        Ok(masks.union(Self::MASK_CLASSES..Self::TABLES.class_count))
     }
 
     /// Called once after the block containing the end of input.

@@ -10,22 +10,18 @@ regularly and predicts well, so it stays fast. simdlex is stage 1; stage 2
 is yours.
 
 ```rust
-use simdlex::tablegen::{ByteSet, Tables, generate, unwrap};
+use simdlex::tablegen::{ByteSet, generate, unwrap};
 use simdlex::{IndexSpec, Indexer, NibbleTables, StructuralIndex};
-
-const TABLES: Tables<2> = unwrap(generate(&[
-    ByteSet::from_bytes(b"<>"),
-    ByteSet::from_bytes(b"'\""),
-]));
 
 struct Html;
 
 impl IndexSpec for Html {
     type State = ();
     type Error = std::convert::Infallible;
-    const TABLES: NibbleTables = NibbleTables { low: TABLES.low, high: TABLES.high };
-    const CLASS_BITS: [u8; 8] = TABLES.padded_class_bits();
-    const CLASS_COUNT: usize = 2;
+    const TABLES: NibbleTables = unwrap(generate(&[
+        ByteSet::from_bytes(b"<>"),
+        ByteSet::from_bytes(b"'\""),
+    ]));
 }
 
 let input = br#"<a href="x">hi</a>"#;

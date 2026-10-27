@@ -1262,7 +1262,7 @@ fn table_is_exact_for_named_sets() {
     for byte in u8::MIN..=u8::MAX {
         let class = YamlSpec::TABLES.classify(byte);
         for (index, set) in members.iter().enumerate() {
-            let selected = class & YamlSpec::CLASS_BITS[index] != 0;
+            let selected = class & YamlSpec::TABLES.class_bits[index] != 0;
             assert_eq!(
                 selected,
                 set.contains(&byte),

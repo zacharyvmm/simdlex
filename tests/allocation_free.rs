@@ -1,4 +1,4 @@
-use simdlex::tablegen::{ByteSet, Tables, generate, unwrap};
+use simdlex::tablegen::{ByteSet, generate, unwrap};
 use simdlex::{IndexSpec, Indexer, NibbleTables, StructuralIndex};
 
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -46,22 +46,15 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
-const TABLES: Tables<2> = unwrap(generate(&[
-    ByteSet::from_bytes(b" "),
-    ByteSet::from_bytes(b"<>"),
-]));
-
 struct Spec;
 
 impl IndexSpec for Spec {
     type State = ();
     type Error = ();
-    const TABLES: NibbleTables = NibbleTables {
-        low: TABLES.low,
-        high: TABLES.high,
-    };
-    const CLASS_BITS: [u8; 8] = TABLES.padded_class_bits();
-    const CLASS_COUNT: usize = 2;
+    const TABLES: NibbleTables = unwrap(generate(&[
+        ByteSet::from_bytes(b" "),
+        ByteSet::from_bytes(b"<>"),
+    ]));
     const MASK_CLASSES: usize = 1;
 }
 

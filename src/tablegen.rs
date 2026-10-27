@@ -1,9 +1,9 @@
 //! Compile-time generation of nibble lookup tables.
 //!
 //! A byte is classified by intersecting `low[byte & 15]` and
-//! `high[byte >> 4]`. This crate turns named byte sets into those two 16-byte
-//! tables plus one bit selector per set, so that for every byte value `b` and
-//! every class `c`:
+//! `high[byte >> 4]`. This module turns named byte sets into a
+//! [`NibbleTables`]: those two 16-byte tables plus one bit selector per set,
+//! so that for every byte value `b` and every class `c`:
 //!
 //! ```text
 //! low[b & 15] & high[b >> 4] & class_bits[c] != 0  <=>  b ∈ classes[c]
@@ -18,9 +18,10 @@
 //! [`Indexer`](crate::Indexer) consumes the emitted `low`/`high` arrays.
 //!
 //! ```
+//! use simdlex::NibbleTables;
 //! use simdlex::tablegen::{ByteSet, generate, unwrap};
 //!
-//! const TABLES: simdlex::tablegen::Tables<3> = unwrap(generate(&[
+//! const TABLES: NibbleTables = unwrap(generate(&[
 //!     ByteSet::from_bytes(b"<>"),
 //!     ByteSet::from_bytes(b"="),
 //!     ByteSet::from_bytes(b"'\""),
@@ -33,14 +34,17 @@
 //! Requests that cannot fit fail to compile:
 //!
 //! ```compile_fail
-//! use simdlex::tablegen::{ByteSet, Tables, generate, unwrap};
+//! use simdlex::NibbleTables;
+//! use simdlex::tablegen::{ByteSet, generate, unwrap};
 //!
 //! // Nine bytes that share no nibble with each other need nine bits.
-//! const DIAGONAL: Tables<1> = unwrap(generate(&[ByteSet::from_bytes(&[
+//! const DIAGONAL: NibbleTables = unwrap(generate(&[ByteSet::from_bytes(&[
 //!     0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
 //! ])]));
 //! # let _ = DIAGONAL;
 //! ```
+use crate::NibbleTables;
+
 /// Classes beyond this count cannot be distinguished with an 8-bit table.
 pub const MAX_CLASSES: usize = 8;
 
@@ -132,35 +136,6 @@ impl ByteSet {
     }
 }
 
-/// Generated tables for `N` classes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Tables<const N: usize> {
-    pub low: [u8; 16],
-    pub high: [u8; 16],
-    /// Bits selecting each class from [`Self::classify`].
-    pub class_bits: [u8; N],
-    /// Number of the eight table bits that were needed.
-    pub bits_used: u32,
-}
-
-impl<const N: usize> Tables<N> {
-    #[inline]
-    pub const fn classify(&self, byte: u8) -> u8 {
-        self.low[(byte & 0x0f) as usize] & self.high[(byte >> 4) as usize]
-    }
-
-    /// `class_bits` zero-extended to eight entries, the shape backends use.
-    pub const fn padded_class_bits(&self) -> [u8; MAX_CLASSES] {
-        let mut out = [0u8; MAX_CLASSES];
-        let mut index = 0;
-        while index < N {
-            out[index] = self.class_bits[index];
-            index += 1;
-        }
-        out
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TableGenError {
     /// More than [`MAX_CLASSES`] classes were requested.
@@ -169,7 +144,10 @@ pub enum TableGenError {
     EmptyClass { class: usize },
     /// The best decomposition found needs more than eight table bits.
     TooManyBits { required: u32 },
-    /// Exhaustive verification failed. This indicates a generator bug.
+    /// The tables have a different number of classes than were checked.
+    ClassCount { tables: usize, classes: usize },
+    /// Exhaustive verification failed: `byte` is classified wrongly for
+    /// `class`. For generated tables this indicates a generator bug.
     Verification { class: usize, byte: u8 },
 }
 
@@ -181,14 +159,15 @@ impl TableGenError {
             Self::TooManyBits { .. } => {
                 "the requested byte classes need more than eight nibble table bits"
             }
-            Self::Verification { .. } => "generated nibble tables failed exhaustive verification",
+            Self::ClassCount { .. } => "nibble tables have a different number of classes",
+            Self::Verification { .. } => "nibble tables failed exhaustive verification",
         }
     }
 }
 
 /// Unwrap a generation result in a `const` item, turning errors into
 /// compile-time diagnostics.
-pub const fn unwrap<const N: usize>(result: Result<Tables<N>, TableGenError>) -> Tables<N> {
+pub const fn unwrap(result: Result<NibbleTables, TableGenError>) -> NibbleTables {
     match result {
         Ok(tables) => tables,
         Err(error) => panic!("{}", error.message()),
@@ -361,7 +340,9 @@ const fn required_bits(
 /// close the gap. This is a heuristic (minimum biclique cover is NP-hard), so
 /// a hand-written table may occasionally fit where generation reports
 /// [`TableGenError::TooManyBits`].
-pub const fn generate<const N: usize>(classes: &[ByteSet; N]) -> Result<Tables<N>, TableGenError> {
+pub const fn generate<const N: usize>(
+    classes: &[ByteSet; N],
+) -> Result<NibbleTables, TableGenError> {
     if N > MAX_CLASSES {
         return Err(TableGenError::TooManyClasses { classes: N });
     }
@@ -408,11 +389,11 @@ pub const fn generate<const N: usize>(classes: &[ByteSet; N]) -> Result<Tables<N
         });
     };
 
-    let mut tables = Tables {
+    let mut tables = NibbleTables {
         low: [0; 16],
         high: [0; 16],
-        class_bits: [0; N],
-        bits_used: assignment.len as u32,
+        class_bits: [0; MAX_CLASSES],
+        class_count: N,
     };
     let mut bit = 0;
     while bit < assignment.len {
@@ -447,9 +428,15 @@ pub const fn generate<const N: usize>(classes: &[ByteSet; N]) -> Result<Tables<N
 /// Check every byte value against every class. Hand-written tables can use
 /// this to obtain the same guarantee as generated ones.
 pub const fn verify<const N: usize>(
-    tables: &Tables<N>,
+    tables: &NibbleTables,
     classes: &[ByteSet; N],
 ) -> Result<(), TableGenError> {
+    if tables.class_count != N {
+        return Err(TableGenError::ClassCount {
+            tables: tables.class_count,
+            classes: N,
+        });
+    }
     let mut byte = 0u16;
     while byte < 256 {
         let classified = tables.classify(byte as u8);
@@ -491,25 +478,25 @@ mod tests {
         ByteSet::range(0x00, 0x1f),
     ];
 
-    const COMPILE_TIME_HTML: Tables<5> = unwrap(generate(&HTML));
-    const COMPILE_TIME_JSON: Tables<5> = unwrap(generate(&JSON));
+    const COMPILE_TIME_HTML: NibbleTables = unwrap(generate(&HTML));
+    const COMPILE_TIME_JSON: NibbleTables = unwrap(generate(&JSON));
 
     #[test]
     fn generates_html_delimiters_one_bit_each() {
-        assert_eq!(COMPILE_TIME_HTML.bits_used, 5);
+        assert_eq!(COMPILE_TIME_HTML.bits_used(), 5);
         assert_eq!(verify(&COMPILE_TIME_HTML, &HTML), Ok(()));
     }
 
     #[test]
     fn generates_overlapping_json_classes_in_eight_bits() {
-        assert_eq!(COMPILE_TIME_JSON.bits_used, 8);
+        assert_eq!(COMPILE_TIME_JSON.bits_used(), 8);
         assert_eq!(verify(&COMPILE_TIME_JSON, &JSON), Ok(()));
     }
 
     #[test]
     fn identical_classes_share_a_bit() {
         let tables = generate(&[ByteSet::from_bytes(b"ab"), ByteSet::from_bytes(b"ab")]).unwrap();
-        assert_eq!(tables.bits_used, 1);
+        assert_eq!(tables.bits_used(), 1);
         assert_eq!(tables.class_bits[0], tables.class_bits[1]);
     }
 
@@ -521,7 +508,7 @@ mod tests {
             set = set.union(ByteSet::range(high | 1, high | 4));
         }
         let tables = generate(&[set]).unwrap();
-        assert_eq!(tables.bits_used, 1);
+        assert_eq!(tables.bits_used(), 1);
     }
 
     #[test]
@@ -556,6 +543,13 @@ mod tests {
             Err(TableGenError::Verification {
                 class: 0,
                 byte: 0x30
+            })
+        );
+        assert_eq!(
+            verify(&tables, &[ByteSet::from_bytes(b"<"), ByteSet::EMPTY]),
+            Err(TableGenError::ClassCount {
+                tables: 1,
+                classes: 2
             })
         );
     }

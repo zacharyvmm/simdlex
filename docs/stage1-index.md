@@ -4,7 +4,7 @@ simdlex is stage 1 of a simdjson-style parser, packaged as a primitive. It
 is one dependency-free crate whose modules follow the data flow:
 
 ```text
-src/tablegen.rs   named byte sets ──► NibbleTables + class bits     (const fn)
+src/tablegen.rs   named byte sets ──► NibbleTables (tables + class bits)  (const fn)
 src/spec.rs       IndexSpec: what a grammar supplies
 src/backend.rs    NibbleTables × 64-byte block ──► class masks      (scalar/SSSE3/AVX2/NEON)
 src/indexer.rs    the block loop: classify, refine, record
@@ -86,7 +86,7 @@ const CLASSES: [ByteSet; 4] = [
     ByteSet::from_bytes(b"'"),
     ByteSet::from_bytes(b"\""),
 ];
-const GENERATED: Tables<4> = unwrap(generate(&CLASSES));
+const TABLES: NibbleTables = unwrap(generate(&CLASSES));
 ```
 
 Each class is partitioned into `low-nibble-set × high-nibble-set` rectangles.
@@ -101,8 +101,9 @@ tables get the same exhaustive check.
 
 ## 2. Execution (`Indexer`)
 
-An `IndexSpec` supplies tables, class selectors, how many leading classes to
-keep as masks, and optionally a per-block hook:
+An `IndexSpec` supplies its `NibbleTables` (one `TABLES` constant, usually
+generated as above), how many leading classes to keep as masks, and
+optionally a per-block hook:
 
 ```rust
 fn scan_block(input: &[u8; 64], base: u32, valid: u64,

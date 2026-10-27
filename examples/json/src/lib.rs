@@ -22,7 +22,7 @@
 
 use std::fmt;
 
-use simdlex::tablegen::{ByteSet, Tables, generate, unwrap};
+use simdlex::tablegen::{ByteSet, generate, unwrap};
 use simdlex::{
     BackendError, BackendKind, ClassifiedBlock, IndexSpec, Indexer, NibbleTables, StructuralIndex,
 };
@@ -51,14 +51,6 @@ const CLASSES: [ByteSet; 5] = [
     ByteSet::from_bytes(b"\\"),
     ByteSet::range(0x00, 0x1f),
 ];
-
-const GENERATED: Tables<5> = unwrap(generate(&CLASSES));
-
-pub const OPERATOR_BITS: u8 = GENERATED.class_bits[0];
-pub const JSON_WHITESPACE_BITS: u8 = GENERATED.class_bits[1];
-pub const QUOTE_BITS: u8 = GENERATED.class_bits[2];
-pub const BACKSLASH_BITS: u8 = GENERATED.class_bits[3];
-pub const CONTROL_BITS: u8 = GENERATED.class_bits[4];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JsonConfig {
@@ -162,21 +154,7 @@ impl IndexSpec for JsonSpec {
     type State = JsonStage1State;
     type Error = JsonError;
 
-    const TABLES: NibbleTables = NibbleTables {
-        low: GENERATED.low,
-        high: GENERATED.high,
-    };
-    const CLASS_BITS: [u8; 8] = [
-        OPERATOR_BITS,
-        JSON_WHITESPACE_BITS,
-        QUOTE_BITS,
-        BACKSLASH_BITS,
-        CONTROL_BITS,
-        0,
-        0,
-        0,
-    ];
-    const CLASS_COUNT: usize = CLASSES.len();
+    const TABLES: NibbleTables = unwrap(generate(&CLASSES));
 
     fn scan_block(
         _input: &[u8; 64],
@@ -891,16 +869,18 @@ mod tests {
 
     #[test]
     fn table_is_exact_for_named_sets() {
+        let [operators, whitespace, quotes, backslashes, controls, ..] =
+            JsonSpec::TABLES.class_bits;
         for byte in u8::MIN..=u8::MAX {
             let class = JsonSpec::TABLES.classify(byte);
             assert_eq!(
-                class & OPERATOR_BITS != 0,
+                class & operators != 0,
                 matches!(byte, b'{' | b'}' | b'[' | b']' | b',' | b':')
             );
-            assert_eq!(class & JSON_WHITESPACE_BITS != 0, is_json_ws(byte));
-            assert_eq!(class & QUOTE_BITS != 0, byte == b'"');
-            assert_eq!(class & BACKSLASH_BITS != 0, byte == b'\\');
-            assert_eq!(class & CONTROL_BITS != 0, byte < 0x20);
+            assert_eq!(class & whitespace != 0, is_json_ws(byte));
+            assert_eq!(class & quotes != 0, byte == b'"');
+            assert_eq!(class & backslashes != 0, byte == b'\\');
+            assert_eq!(class & controls != 0, byte < 0x20);
         }
     }
 

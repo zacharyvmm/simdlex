@@ -39,7 +39,7 @@ use std::collections::TryReserveError;
 use std::convert::Infallible;
 use std::fmt;
 
-use simdlex::tablegen::{ByteSet, Tables, generate, unwrap};
+use simdlex::tablegen::{ByteSet, generate, unwrap};
 use simdlex::{
     BackendError, BackendKind, IndexSpec, Indexer, NibbleTables, StructuralIndex, TapeCursor,
 };
@@ -64,8 +64,6 @@ fn span(start: usize, end: usize) -> Span {
 /// Names, whitespace, and `=` are read in place inside those bounds.
 const CLASSES: [ByteSet; 2] = [ByteSet::from_bytes(b"<>"), ByteSet::from_bytes(b"'\"")];
 
-const GENERATED: Tables<2> = unwrap(generate(&CLASSES));
-
 /// The HTML structural index: `<`, `>`, `'`, and `"` on a tape.
 #[derive(Debug, Clone, Copy)]
 pub struct HtmlSpec;
@@ -74,12 +72,7 @@ impl IndexSpec for HtmlSpec {
     type State = ();
     type Error = Infallible;
 
-    const TABLES: NibbleTables = NibbleTables {
-        low: GENERATED.low,
-        high: GENERATED.high,
-    };
-    const CLASS_BITS: [u8; 8] = GENERATED.padded_class_bits();
-    const CLASS_COUNT: usize = CLASSES.len();
+    const TABLES: NibbleTables = unwrap(generate(&CLASSES));
 }
 
 /// Stage 1 and a reusable index. [`Self::events`] indexes a document and

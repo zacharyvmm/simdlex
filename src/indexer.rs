@@ -240,14 +240,8 @@ unsafe fn scan_neon<S: IndexSpec>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tablegen::{ByteSet, Tables, generate, unwrap};
+    use crate::tablegen::{ByteSet, generate, unwrap};
     use crate::{NibbleTables, TapeCursor, available_backends, classify_block};
-
-    const GENERATED: Tables<3> = unwrap(generate(&[
-        ByteSet::from_bytes(b" \n"),
-        ByteSet::from_bytes(b"<>"),
-        ByteSet::from_bytes(b"="),
-    ]));
 
     /// Keeps whitespace as masks and puts `<`, `>`, and `=` on the tape.
     struct Demo;
@@ -256,19 +250,13 @@ mod tests {
         type State = ();
         type Error = ();
 
-        const TABLES: NibbleTables = NibbleTables {
-            low: GENERATED.low,
-            high: GENERATED.high,
-        };
-        const CLASS_BITS: [u8; 8] = GENERATED.padded_class_bits();
-        const CLASS_COUNT: usize = 3;
+        const TABLES: NibbleTables = unwrap(generate(&[
+            ByteSet::from_bytes(b" \n"),
+            ByteSet::from_bytes(b"<>"),
+            ByteSet::from_bytes(b"="),
+        ]));
         const MASK_CLASSES: usize = 1;
     }
-
-    const QUOTES: Tables<2> = unwrap(generate(&[
-        ByteSet::from_bytes(b"<"),
-        ByteSet::from_bytes(b"\""),
-    ]));
 
     /// `<` outside double quotes, with quote state carried across blocks and
     /// windows, and an error for an unterminated quote.
@@ -278,12 +266,10 @@ mod tests {
         type State = bool;
         type Error = u32;
 
-        const TABLES: NibbleTables = NibbleTables {
-            low: QUOTES.low,
-            high: QUOTES.high,
-        };
-        const CLASS_BITS: [u8; 8] = QUOTES.padded_class_bits();
-        const CLASS_COUNT: usize = 2;
+        const TABLES: NibbleTables = unwrap(generate(&[
+            ByteSet::from_bytes(b"<"),
+            ByteSet::from_bytes(b"\""),
+        ]));
 
         fn scan_block(
             _input: &[u8; 64],
@@ -500,8 +486,6 @@ mod tests {
         type Error = ();
 
         const TABLES: NibbleTables = Demo::TABLES;
-        const CLASS_BITS: [u8; 8] = Demo::CLASS_BITS;
-        const CLASS_COUNT: usize = Demo::CLASS_COUNT;
     }
 
     #[test]

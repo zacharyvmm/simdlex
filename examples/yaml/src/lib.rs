@@ -25,7 +25,7 @@ mod tests;
 use std::convert::Infallible;
 use std::fmt;
 
-use simdlex::tablegen::{ByteSet, Tables, generate, unwrap};
+use simdlex::tablegen::{ByteSet, generate, unwrap};
 use simdlex::{BackendError, BackendKind, IndexSpec, Indexer, NibbleTables, StructuralIndex};
 
 /// A half-open byte range of the input.
@@ -63,8 +63,6 @@ const CLASSES: [ByteSet; 3] = [
     ByteSet::from_bytes(b" "),
     ByteSet::from_bytes(b"'\""),
 ];
-
-const GENERATED: Tables<3> = unwrap(generate(&CLASSES));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct YamlConfig {
@@ -229,12 +227,7 @@ impl IndexSpec for YamlSpec {
     type State = ();
     type Error = Infallible;
 
-    const TABLES: NibbleTables = NibbleTables {
-        low: GENERATED.low,
-        high: GENERATED.high,
-    };
-    const CLASS_BITS: [u8; 8] = GENERATED.padded_class_bits();
-    const CLASS_COUNT: usize = CLASSES.len();
+    const TABLES: NibbleTables = unwrap(generate(&CLASSES));
     // Spaces and line breaks are dense, so they stay masks. Quotes are the
     // sparse remainder and become the tape (the default `scan_block`).
     // Quote context cannot be resolved here: a `'` inside a plain scalar
