@@ -52,6 +52,12 @@ const CLASSES: [ByteSet; 5] = [
     ByteSet::range(0x00, 0x1f),
 ];
 
+pub const OPERATOR_BITS: u8 = JsonSpec::TABLES.class_bits[0];
+pub const JSON_WHITESPACE_BITS: u8 = JsonSpec::TABLES.class_bits[1];
+pub const QUOTE_BITS: u8 = JsonSpec::TABLES.class_bits[2];
+pub const BACKSLASH_BITS: u8 = JsonSpec::TABLES.class_bits[3];
+pub const CONTROL_BITS: u8 = JsonSpec::TABLES.class_bits[4];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JsonConfig {
     pub max_depth: usize,
@@ -869,18 +875,16 @@ mod tests {
 
     #[test]
     fn table_is_exact_for_named_sets() {
-        let [operators, whitespace, quotes, backslashes, controls, ..] =
-            JsonSpec::TABLES.class_bits;
         for byte in u8::MIN..=u8::MAX {
             let class = JsonSpec::TABLES.classify(byte);
             assert_eq!(
-                class & operators != 0,
+                class & OPERATOR_BITS != 0,
                 matches!(byte, b'{' | b'}' | b'[' | b']' | b',' | b':')
             );
-            assert_eq!(class & whitespace != 0, is_json_ws(byte));
-            assert_eq!(class & quotes != 0, byte == b'"');
-            assert_eq!(class & backslashes != 0, byte == b'\\');
-            assert_eq!(class & controls != 0, byte < 0x20);
+            assert_eq!(class & JSON_WHITESPACE_BITS != 0, is_json_ws(byte));
+            assert_eq!(class & QUOTE_BITS != 0, byte == b'"');
+            assert_eq!(class & BACKSLASH_BITS != 0, byte == b'\\');
+            assert_eq!(class & CONTROL_BITS != 0, byte < 0x20);
         }
     }
 
