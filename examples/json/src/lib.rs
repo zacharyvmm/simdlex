@@ -22,7 +22,7 @@
 
 use std::fmt;
 
-use simdlex::tablegen::{ByteSet, Tables, generate, unwrap};
+use simdlex::tablegen::{ByteSet, generate, unwrap};
 use simdlex::{
     BackendError, BackendKind, ClassifiedBlock, IndexSpec, Indexer, NibbleTables, StructuralIndex,
 };
@@ -52,13 +52,11 @@ const CLASSES: [ByteSet; 5] = [
     ByteSet::range(0x00, 0x1f),
 ];
 
-const GENERATED: Tables<5> = unwrap(generate(&CLASSES));
-
-pub const OPERATOR_BITS: u8 = GENERATED.class_bits[0];
-pub const JSON_WHITESPACE_BITS: u8 = GENERATED.class_bits[1];
-pub const QUOTE_BITS: u8 = GENERATED.class_bits[2];
-pub const BACKSLASH_BITS: u8 = GENERATED.class_bits[3];
-pub const CONTROL_BITS: u8 = GENERATED.class_bits[4];
+pub const OPERATOR_BITS: u8 = JsonSpec::TABLES.class_bits[0];
+pub const JSON_WHITESPACE_BITS: u8 = JsonSpec::TABLES.class_bits[1];
+pub const QUOTE_BITS: u8 = JsonSpec::TABLES.class_bits[2];
+pub const BACKSLASH_BITS: u8 = JsonSpec::TABLES.class_bits[3];
+pub const CONTROL_BITS: u8 = JsonSpec::TABLES.class_bits[4];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JsonConfig {
@@ -162,21 +160,7 @@ impl IndexSpec for JsonSpec {
     type State = JsonStage1State;
     type Error = JsonError;
 
-    const TABLES: NibbleTables = NibbleTables {
-        low: GENERATED.low,
-        high: GENERATED.high,
-    };
-    const CLASS_BITS: [u8; 8] = [
-        OPERATOR_BITS,
-        JSON_WHITESPACE_BITS,
-        QUOTE_BITS,
-        BACKSLASH_BITS,
-        CONTROL_BITS,
-        0,
-        0,
-        0,
-    ];
-    const CLASS_COUNT: usize = CLASSES.len();
+    const TABLES: NibbleTables = unwrap(generate(&CLASSES));
 
     fn scan_block(
         _input: &[u8; 64],

@@ -108,8 +108,8 @@ pub(crate) fn classify_scalar<S: IndexSpec>(block: &[u8; 64]) -> ClassifiedBlock
         let bit = 1u64 << lane;
         let class = S::TABLES.classify(byte);
 
-        for selected in 0..S::CLASS_COUNT {
-            if class & S::CLASS_BITS[selected] != 0 {
+        for selected in 0..S::TABLES.class_count {
+            if class & S::TABLES.class_bits[selected] != 0 {
                 out.class[selected] |= bit;
             }
         }
@@ -140,8 +140,8 @@ pub(crate) unsafe fn classify_ssse3<S: IndexSpec>(block: &[u8; 64]) -> Classifie
         );
         let shift = part * 16;
 
-        for selected in 0..S::CLASS_COUNT {
-            let wanted = _mm_set1_epi8(S::CLASS_BITS[selected] as i8);
+        for selected in 0..S::TABLES.class_count {
+            let wanted = _mm_set1_epi8(S::TABLES.class_bits[selected] as i8);
             let selected_classes = _mm_and_si128(classes, wanted);
             let is_zero = _mm_cmpeq_epi8(selected_classes, zero);
             let class_mask = (!_mm_movemask_epi8(is_zero) as u32) & 0xffff;
@@ -176,8 +176,8 @@ pub(crate) unsafe fn classify_avx2<S: IndexSpec>(block: &[u8; 64]) -> Classified
         );
         let shift = part * 32;
 
-        for selected in 0..S::CLASS_COUNT {
-            let wanted = _mm256_set1_epi8(S::CLASS_BITS[selected] as i8);
+        for selected in 0..S::TABLES.class_count {
+            let wanted = _mm256_set1_epi8(S::TABLES.class_bits[selected] as i8);
             let selected_classes = _mm256_and_si256(classes, wanted);
             let is_zero = _mm256_cmpeq_epi8(selected_classes, zero);
             let class_mask = !_mm256_movemask_epi8(is_zero) as u32;
@@ -207,8 +207,8 @@ pub(crate) unsafe fn classify_neon<S: IndexSpec>(block: &[u8; 64]) -> Classified
         *classes = vandq_u8(vqtbl1q_u8(lo_table, low), vqtbl1q_u8(hi_table, high));
     }
 
-    for selected in 0..S::CLASS_COUNT {
-        let wanted = vdupq_n_u8(S::CLASS_BITS[selected]);
+    for selected in 0..S::TABLES.class_count {
+        let wanted = vdupq_n_u8(S::TABLES.class_bits[selected]);
         out.class[selected] = unsafe {
             movemask_64([
                 vtstq_u8(classes[0], wanted),
