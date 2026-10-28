@@ -44,8 +44,10 @@ assert_eq!(index.tape(), [0, 8, 10, 11, 14, 17]);
 | `TapeCursor` | "Next structural of this kind at or after here", with galloping `seek` for a stage 2 that skips ahead. |
 | `MaskView` | `next_in` across chosen classes and `run_length` (indentation) over the masks. |
 
-The library is two dependency-free crates, `simdlex-tablegen` and
-`simdlex-index`, which the `simdlex` crate re-exports.
+The library is one dependency-free crate. Its modules follow the data flow:
+`tablegen` (byte sets → tables), `spec` (the grammar contract), `backend`
+(per-CPU block classifiers), `indexer` (the block loop), and `index` (the
+tape and masks stage 2 reads).
 
 ## What to index
 

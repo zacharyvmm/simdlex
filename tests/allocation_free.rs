@@ -1,5 +1,5 @@
-use simdlex_index::{IndexSpec, Indexer, NibbleTables, StructuralIndex};
-use simdlex_tablegen::{ByteSet, Tables, generate, unwrap};
+use simdlex::tablegen::{ByteSet, Tables, generate, unwrap};
+use simdlex::{IndexSpec, Indexer, NibbleTables, StructuralIndex};
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;

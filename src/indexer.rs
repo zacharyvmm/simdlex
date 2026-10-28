@@ -1,40 +1,7 @@
-//! simdjson-style structural indexing for any byte-level grammar.
-//!
-//! This crate is stage 1 of a two-stage parser. It classifies input in
-//! 64-byte blocks with a scalar, SSSE3, AVX2, or NEON backend, lets an
-//! [`IndexSpec`] refine each block (for example, removing bytes inside
-//! strings), and records the structural offsets on a tape. Specs may also
-//! keep per-block masks for dense classes such as indentation spaces. It
-//! never interprets the result: a stage-2 state machine walks the tape with a
-//! [`TapeCursor`] and the masks with a [`MaskView`].
-//!
-//! The index exists to find a grammar's *bounds* (tag edges, line ends,
-//! closing quotes) so that the stage-2 state machine can be placed at the
-//! start of a region and parse the content inside it. Inside known bounds
-//! its hot loop branches regularly and predicts well; the unpredictable
-//! decisions happen once per bound instead of once per byte. Index only the
-//! bytes stage 2 must search for: a byte it reads in place (such as HTML's
-//! `=` or YAML's `:`) only costs stage-1 time and gets skipped. See
-//! `docs/stage1-index.md` for the measurements behind this rule.
-//!
-//! Inputs can be indexed whole ([`Indexer::index`]) or in windows
-//! ([`Indexer::index_window`]), so a parser that may stop early (after a
-//! first match, say) only pays for the part of the input it reaches.
-//!
-//! Tables are plain data ([`NibbleTables`]), so this crate does not depend on
-//! how they were produced. `simdlex-tablegen` generates them at compile time.
-
-mod backend;
-mod index;
-mod spec;
-
 use std::ops::Range;
 
-pub use backend::{
-    BackendError, BackendKind, available_backends, best_backend, classify_block, resolve_backend,
-};
-pub use index::{MaskView, SAFETY_PADDING, StructuralIndex, TapeCursor};
-pub use spec::{ClassifiedBlock, IndexSpec, NibbleTables};
+use crate::backend::{self, BackendError, BackendKind, resolve_backend};
+use crate::{ClassifiedBlock, IndexSpec, StructuralIndex};
 
 type RunFn<S> = fn(
     &[u8],
@@ -287,7 +254,8 @@ fn run<S: IndexSpec>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use simdlex_tablegen::{ByteSet, Tables, generate, unwrap};
+    use crate::tablegen::{ByteSet, Tables, generate, unwrap};
+    use crate::{NibbleTables, TapeCursor, available_backends, classify_block};
 
     const GENERATED: Tables<3> = unwrap(generate(&[
         ByteSet::from_bytes(b" \n"),

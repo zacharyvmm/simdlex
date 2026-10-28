@@ -1,16 +1,18 @@
 # Stage 1: table generation and indexing
 
 simdlex is stage 1 of a simdjson-style parser, packaged as a primitive. It
-is two dependency-free crates, re-exported together by the `simdlex`
-facade:
+is one dependency-free crate whose modules follow the data flow:
 
 ```text
-crates/simdlex-tablegen   named byte sets ──► NibbleTables + class bits     (const fn, no_std)
-crates/simdlex-index      NibbleTables + IndexSpec ──► tape (+ class masks)  (scalar/SSSE3/AVX2/NEON)
+src/tablegen.rs   named byte sets ──► NibbleTables + class bits     (const fn)
+src/spec.rs       IndexSpec: what a grammar supplies
+src/backend.rs    NibbleTables × 64-byte block ──► class masks      (scalar/SSSE3/AVX2/NEON)
+src/indexer.rs    the block loop: classify, refine, record
+src/index.rs      tape (+ class masks), TapeCursor, MaskView         (what stage 2 reads)
 ```
 
-`simdlex-index` never sees the generator: tables are plain data, so
-hand-written tables keep working. `simdlex-tablegen` never sees a backend.
+The indexer never sees the generator: tables are plain data, so
+hand-written tables keep working. `tablegen` never sees a backend.
 Stage 2 is the user's: the grammars under `examples/` show three.
 
 ## What the index is for
@@ -73,7 +75,7 @@ memory than a fixed set of masks per block: when HTML's bounds were stored
 both ways, the tape built at 6.16 GiB/s and the masks at 4.75 GiB/s. That
 is why there is no masks-only mode.
 
-## 1. Table generation (`simdlex-tablegen`)
+## 1. Table generation (`tablegen`)
 
 A grammar lists its byte classes and generates tables in a `const` item:
 
@@ -97,7 +99,7 @@ Unsatisfiable requests (more than eight bits) fail at compile time. Minimum
 biclique cover is NP-hard, so this is a heuristic; `verify` lets hand-written
 tables get the same exhaustive check.
 
-## 2. Execution (`simdlex-index`)
+## 2. Execution (`Indexer`)
 
 An `IndexSpec` supplies tables, class selectors, how many leading classes to
 keep as masks, and optionally a per-block hook:

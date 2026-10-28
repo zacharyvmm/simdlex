@@ -8,12 +8,10 @@ repository = "https://github.com/zacharyvmm/simdlex"
 autoexamples = false
 
 [workspace]
-members = ["crates/simdlex-tablegen", "crates/simdlex-index", "examples/*"]
+members = ["examples/*"]
 
 [workspace.dependencies]
 simdlex = { path = "." }
 criterion = "0.5"
 
 [dependencies]
-simdlex-index = { path = "crates/simdlex-index" }
-simdlex-tablegen = { path = "crates/simdlex-tablegen" }
