@@ -2,9 +2,16 @@
 name = "simdlex"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
 description = "simdjson-style structural indexing as a primitive for any byte-level grammar"
+authors = ["Zachary McSween Manickchand <contact@zacharymm.com>"]
 license = "MIT"
 repository = "https://github.com/zacharyvmm/simdlex"
+documentation = "https://docs.rs/simdlex"
+readme = "README.md"
+keywords = ["simd", "parser", "lexer", "tokenizer", "simdjson"]
+categories = ["parsing", "text-processing"]
+include = ["/src", "/tests", "/docs", "/README.md", "/LICENSE"]
 autoexamples = false
 
 [workspace]
